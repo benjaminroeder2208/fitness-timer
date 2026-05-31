@@ -35,6 +35,15 @@ function signalRest(ctx){createBeep(ctx,660,0.15,0.5);setTimeout(()=>createBeep(
 function signalCountdown(ctx){createBeep(ctx,700,0.1,0.4);}
 function signalDone(ctx){[0,150,300,500].forEach((t,i)=>setTimeout(()=>createBeep(ctx,[880,1100,880,1320][i],0.2,0.7),t));}
 
+// 25002500 Speech 250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500
+function speak(text){
+  if(!window.speechSynthesis)return;
+  window.speechSynthesis.cancel();
+  const utt=new SpeechSynthesisUtterance(text);
+  utt.lang="de-DE";utt.rate=1.0;utt.pitch=1.0;utt.volume=1.0;
+  setTimeout(()=>window.speechSynthesis.speak(utt),300);
+}
+
 // ── Defaults ──────────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG={
   rounds:1,
@@ -142,7 +151,7 @@ function FitnessTimer(){
     const isLastRound=s.round===cfg.rounds;
 
     if(s.phase===PHASES.COUNTDOWN){
-      if(ctx)signalStart(ctx);
+      if(ctx){signalStart(ctx);speak(cfg.exercises[s.exIdx].name);}
       return{phase:PHASES.WORK,timeLeft:cfg.exercises[s.exIdx].workSec,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
     }
 
@@ -154,7 +163,7 @@ function FitnessTimer(){
       }
       // Letzter Durchlauf dieser Übung
       if(isLastEx&&isLastRound){
-        if(ctx)signalDone(ctx);
+        if(ctx){signalDone(ctx);setTimeout(()=>speak("Super, Training beendet!"),600);}
         return{phase:PHASES.DONE,timeLeft:0,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
       }
       if(isLastEx){
@@ -162,8 +171,8 @@ function FitnessTimer(){
         if(ctx)signalRest(ctx);
         return{phase:PHASES.ROUND_REST,timeLeft:cfg.restBetweenRounds,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
       }
-      // Nächste Übung → kurze Pause (restSec der aktuellen Übung als Übergangspause)
-      if(ctx)signalRest(ctx);
+      // Nächste Übung → Pause, dann Ansage der nächsten Übung
+      if(ctx){signalRest(ctx);setTimeout(()=>speak("Weiter mit "+cfg.exercises[s.exIdx+1].name),400);}
       return{phase:PHASES.SET_REST,timeLeft:ex.restSec,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
     }
 
@@ -175,13 +184,13 @@ function FitnessTimer(){
 
     if(s.phase===PHASES.SET_REST){
       // Nach Übungs-Pause: nächste Übung, Set 1
-      if(ctx)signalStart(ctx);
+      if(ctx){signalStart(ctx);speak(cfg.exercises[s.exIdx+1].name);}
       return{phase:PHASES.WORK,timeLeft:cfg.exercises[s.exIdx+1].workSec,exIdx:s.exIdx+1,exSet:1,round:s.round};
     }
 
     if(s.phase===PHASES.ROUND_REST){
       // Nach Runden-Pause: neue Runde, erste Übung, Set 1
-      if(ctx)signalStart(ctx);
+      if(ctx){signalStart(ctx);speak(cfg.exercises[0].name);}
       return{phase:PHASES.WORK,timeLeft:cfg.exercises[0].workSec,exIdx:0,exSet:1,round:s.round+1};
     }
 
@@ -238,6 +247,8 @@ function FitnessTimer(){
     getAudioCtx();await acquireWakeLock();
     setRound(1);setExIdx(0);setExSet(1);setIsPaused(false);
     setPhase(PHASES.COUNTDOWN);setTimeLeft(config.countdownSec);startTick();
+    // Ansage der ersten Übung während Countdown
+    setTimeout(()=>speak(config.exercises[0].name),500);
   },[config,getAudioCtx,acquireWakeLock,startTick]);
 
   const handlePause=useCallback(()=>{
@@ -250,6 +261,7 @@ function FitnessTimer(){
 
   const handleReset=useCallback(()=>{
     stopTimer();releaseWakeLock();
+    if(window.speechSynthesis)window.speechSynthesis.cancel();
     setPhase(PHASES.IDLE);setRound(1);setExIdx(0);setExSet(1);setTimeLeft(0);setIsPaused(false);
   },[stopTimer,releaseWakeLock]);
 
