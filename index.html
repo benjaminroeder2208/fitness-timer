@@ -29,7 +29,7 @@
 const {useState,useEffect,useRef,useCallback}=React;
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
-function createBeep(ctx,freq,dur,vol=0.6){
+function createBeep(ctx,freq,dur,vol=1.0){
   const osc=ctx.createOscillator(),gain=ctx.createGain();
   osc.connect(gain);gain.connect(ctx.destination);
   osc.frequency.value=freq;osc.type="sine";
@@ -37,17 +37,20 @@ function createBeep(ctx,freq,dur,vol=0.6){
   gain.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+dur);
   osc.start(ctx.currentTime);osc.stop(ctx.currentTime+dur);
 }
-function signalStart(ctx){createBeep(ctx,880,0.15,0.7);setTimeout(()=>createBeep(ctx,1100,0.25,0.7),160);}
-function signalRest(ctx){createBeep(ctx,660,0.15,0.5);setTimeout(()=>createBeep(ctx,440,0.3,0.5),160);}
-function signalCountdown(ctx){createBeep(ctx,700,0.1,0.4);}
-function signalDone(ctx){[0,150,300,500].forEach((t,i)=>setTimeout(()=>createBeep(ctx,[880,1100,880,1320][i],0.2,0.7),t));}
+function signalStart(ctx){createBeep(ctx,880,0.18,1.0);setTimeout(()=>createBeep(ctx,1100,0.28,1.0),160);}
+function signalRest(ctx){createBeep(ctx,660,0.18,1.0);setTimeout(()=>createBeep(ctx,440,0.3,1.0),160);}
+function signalCountdown(ctx){createBeep(ctx,700,0.12,1.0);}
+function signalDone(ctx){[0,150,300,500].forEach((t,i)=>setTimeout(()=>createBeep(ctx,[880,1100,880,1320][i],0.25,1.0),t));}
 
 // ── Speech ────────────────────────────────────────────────────────────────────
 function speak(text){
   if(!window.speechSynthesis)return;
   window.speechSynthesis.cancel();
   const utt=new SpeechSynthesisUtterance(text);
-  utt.lang="de-DE";utt.rate=1.0;utt.pitch=1.0;utt.volume=1.0;
+  utt.lang="de-DE";
+  utt.rate=0.95;   // slightly slower = clearer
+  utt.pitch=1.0;
+  utt.volume=1.0;  // max allowed by Web Speech API
   setTimeout(()=>window.speechSynthesis.speak(utt),300);
 }
 
