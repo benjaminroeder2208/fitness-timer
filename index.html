@@ -11,9 +11,11 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
 <style>
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
-  body{margin:0;padding:0;background:#0a0a0f;font-family:'Courier New',monospace;overscroll-behavior:none;}
+  body{margin:0;padding:0;font-family:'Courier New',monospace;overscroll-behavior:none;transition:background 0.3s;}
   input{font-size:16px!important;}
   button{touch-action:manipulation;}
+  body.dark{--bg:#0a0a0f;--bg2:#111118;--bg3:#1a1a2e;--bg4:#0d0d18;--border:#2a2a40;--border2:#1e1e32;--text:#f0f0f0;--text2:#aaaaaa;--text3:#777777;--text4:#444444;--overlay:#000000cc;--del-bg:#1a0808;--del-border:#f9731666;}
+  body.light{--bg:#f4f4f8;--bg2:#ffffff;--bg3:#e8e8f0;--bg4:#ededf5;--border:#c8c8d8;--border2:#d8d8e8;--text:#0a0a1a;--text2:#333344;--text3:#666677;--text4:#9999aa;--overlay:#00000088;--del-bg:#fff0f0;--del-border:#f9731688;}
 </style>
 </head>
 <body>
@@ -35,7 +37,7 @@ function signalRest(ctx){createBeep(ctx,660,0.15,0.5);setTimeout(()=>createBeep(
 function signalCountdown(ctx){createBeep(ctx,700,0.1,0.4);}
 function signalDone(ctx){[0,150,300,500].forEach((t,i)=>setTimeout(()=>createBeep(ctx,[880,1100,880,1320][i],0.2,0.7),t));}
 
-// 25002500 Speech 250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500250025002500
+// ── Speech ────────────────────────────────────────────────────────────────────
 function speak(text){
   if(!window.speechSynthesis)return;
   window.speechSynthesis.cancel();
@@ -44,39 +46,103 @@ function speak(text){
   setTimeout(()=>window.speechSynthesis.speak(utt),300);
 }
 
-// ── Defaults ──────────────────────────────────────────────────────────────────
+// ── Theme ─────────────────────────────────────────────────────────────────────
+function getSystemTheme(){return window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+function loadTheme(){return localStorage.getItem("fit-theme")||"system";}
+function saveTheme(t){localStorage.setItem("fit-theme",t);}
+function resolveTheme(pref){return pref==="system"?getSystemTheme():pref;}
+
+// ── YouTube helpers ──────────────────────────────────────────────────────────
+function extractYouTubeId(url){
+  if(!url||!url.trim())return null;
+  const patterns=[
+    /youtu\.be\/([\w-]{11})/,
+    /[?&]v=([\w-]{11})/,
+    /embed\/([\w-]{11})/,
+    /shorts\/([\w-]{11})/,
+  ];
+  for(const p of patterns){const m=url.match(p);if(m)return m[1];}
+  return null;
+}
+function youtubeEmbedUrl(url){
+  const id=extractYouTubeId(url);
+  if(!id)return null;
+  return `https://www.youtube-nocookie.com/embed/${id}?autoplay=0&rel=0&modestbranding=1`;
+}
+
+// ── Data model ────────────────────────────────────────────────────────────────
+// items[] contains objects of two types:
+//   { type:"exercise", name, workSec, restSec, sets }
+//   { type:"break",    durationSec }
+//
+// The sequence is always: ex, [break], ex, [break], ex, ...
+// "break" items sit BETWEEN exercises in the items array.
+
+const DEFAULT_ITEMS=[
+  {type:"exercise",name:"Burpees",      workSec:20,restSec:10,sets:8},
+  {type:"break",   durationSec:30},
+  {type:"exercise",name:"Jumping Jacks",workSec:20,restSec:10,sets:8},
+  {type:"break",   durationSec:30},
+  {type:"exercise",name:"Plank",        workSec:20,restSec:10,sets:8},
+  {type:"break",   durationSec:30},
+  {type:"exercise",name:"Squats",       workSec:20,restSec:10,sets:8},
+  {type:"break",   durationSec:30},
+  {type:"exercise",name:"Lunges",       workSec:20,restSec:10,sets:8},
+];
+
 const DEFAULT_CONFIG={
   rounds:1,
-  exercises:[
-    {name:"Burpees",      workSec:20,restSec:10,sets:8},
-    {name:"Jumping Jacks",workSec:20,restSec:10,sets:8},
-    {name:"Plank",        workSec:20,restSec:10,sets:8},
-    {name:"Squats",       workSec:20,restSec:10,sets:8},
-    {name:"Lunges",       workSec:20,restSec:10,sets:8},
-  ],
+  items:DEFAULT_ITEMS,
   restBetweenRounds:60,
   countdownSec:20,
+  youtubeUrl:"",
 };
 
-// Phase-Konstanten
-// exSet = aktueller Durchlauf (1-basiert) der aktuellen Übung
-const PHASES={IDLE:"idle",COUNTDOWN:"countdown",WORK:"work",REST:"rest",SET_REST:"set_rest",ROUND_REST:"round_rest",DONE:"done"};
+// Build a flat execution sequence from config.items for one round:
+// [ {kind:"exercise", exIdx, ...ex}, {kind:"break", durationSec}, ... ]
+// exIdx counts only exercises (0-based)
+function buildSequence(items){
+  const seq=[];
+  let exIdx=0;
+  for(const item of items){
+    if(item.type==="exercise"){seq.push({kind:"exercise",exIdx:exIdx++,...item});}
+    else if(item.type==="break"){seq.push({kind:"break",durationSec:item.durationSec});}
+  }
+  return seq;
+}
 
-function pad(n){return String(n).padStart(2,"0");}
-function fmtTime(s){return `${pad(Math.floor(s/60))}:${pad(s%60)}`;}
+function totalExercises(items){return items.filter(x=>x.type==="exercise").length;}
+
 function totalWorkoutSec(cfg){
-  // Pro Runde: für jede Übung: sets × workSec + (sets-1) × restSec (Pause nach letztem Set entfällt)
-  const perRound=cfg.exercises.reduce((sum,e)=>sum+e.sets*e.workSec+(e.sets-1)*e.restSec,0);
+  const seq=buildSequence(cfg.items);
+  const perRound=seq.reduce((s,step)=>{
+    if(step.kind==="exercise")return s+step.sets*step.workSec+(step.sets-1)*step.restSec;
+    return s+step.durationSec;
+  },0);
   return perRound*cfg.rounds+(cfg.rounds-1)*cfg.restBetweenRounds;
 }
 
-// ── Storage ───────────────────────────────────────────────────────────────────
-const STORAGE_KEY="fitness-timer-workouts-v2";
+const PHASES={IDLE:"idle",COUNTDOWN:"countdown",WORK:"work",REST:"rest",EX_BREAK:"ex_break",ROUND_REST:"round_rest",DONE:"done"};
+function pad(n){return String(n).padStart(2,"0");}
+function fmtTime(s){return `${pad(Math.floor(s/60))}:${pad(s%60)}`;}
+
+const STORAGE_KEY="fitness-timer-workouts-v3";
 function loadWorkouts(){try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]");}catch{return[];}}
 function saveWorkoutsToStorage(list){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(list));}catch{}}
 
 // ── App ───────────────────────────────────────────────────────────────────────
 function FitnessTimer(){
+  const [themePref,setThemePref]=useState(()=>loadTheme());
+  const theme=resolveTheme(themePref);
+  const dark=theme==="dark";
+  useEffect(()=>{document.body.className=theme;saveTheme(themePref);},[theme,themePref]);
+  useEffect(()=>{
+    if(themePref!=="system")return;
+    const mq=window.matchMedia("(prefers-color-scheme: dark)");
+    const h=()=>document.body.className=resolveTheme("system");
+    mq.addEventListener("change",h);return()=>mq.removeEventListener("change",h);
+  },[themePref]);
+
   const [tab,setTab]=useState("timer");
   const [config,setConfig]=useState(DEFAULT_CONFIG);
   const [editConfig,setEditConfig]=useState(DEFAULT_CONFIG);
@@ -85,11 +151,11 @@ function FitnessTimer(){
   const [saveName,setSaveName]=useState("");
   const [confirmDelete,setConfirmDelete]=useState(null);
 
-  // Timer state
+  // Timer state – seqIdx = current step index in the flat sequence
   const [phase,setPhase]=useState(PHASES.IDLE);
-  const [round,setRound]=useState(1);       // aktueller Runden-Index (1-basiert)
-  const [exIdx,setExIdx]=useState(0);       // aktueller Übungs-Index
-  const [exSet,setExSet]=useState(1);       // aktueller Durchlauf der Übung (1-basiert)
+  const [round,setRound]=useState(1);
+  const [seqIdx,setSeqIdx]=useState(0);   // index into buildSequence result
+  const [exSet,setExSet]=useState(1);     // current set within exercise
   const [timeLeft,setTimeLeft]=useState(0);
   const [isPaused,setIsPaused]=useState(false);
   const [wakeLockStatus,setWakeLockStatus]=useState("idle");
@@ -101,29 +167,19 @@ function FitnessTimer(){
   const deadlineRef=useRef(null);
   const lastBeepSecRef=useRef(-1);
 
-  useEffect(()=>{stateRef.current={phase,round,exIdx,exSet,timeLeft,isPaused,config};});
+  useEffect(()=>{stateRef.current={phase,round,seqIdx,exSet,timeLeft,isPaused,config};});
   useEffect(()=>{saveWorkoutsToStorage(savedWorkouts);},[savedWorkouts]);
 
-  // ── Wake Lock ─────────────────────────────────────────────────────────────
+  // Wake Lock
   const acquireWakeLock=useCallback(async()=>{
     if(!("wakeLock" in navigator)){setWakeLockStatus("denied");return;}
-    try{
-      wakeLockRef.current=await navigator.wakeLock.request("screen");
-      setWakeLockStatus("active");
-      wakeLockRef.current.addEventListener("release",()=>setWakeLockStatus("idle"));
-    }catch{setWakeLockStatus("denied");}
+    try{wakeLockRef.current=await navigator.wakeLock.request("screen");setWakeLockStatus("active");wakeLockRef.current.addEventListener("release",()=>setWakeLockStatus("idle"));}catch{setWakeLockStatus("denied");}
   },[]);
-  const releaseWakeLock=useCallback(()=>{
-    wakeLockRef.current?.release();wakeLockRef.current=null;setWakeLockStatus("idle");
-  },[]);
-
+  const releaseWakeLock=useCallback(()=>{wakeLockRef.current?.release();wakeLockRef.current=null;setWakeLockStatus("idle");},[]);
   useEffect(()=>{
     const onVisible=async()=>{
       if(document.visibilityState==="visible"&&stateRef.current.phase!==PHASES.IDLE&&stateRef.current.phase!==PHASES.DONE){
-        if(deadlineRef.current!==null&&!stateRef.current.isPaused){
-          const drift=performance.now()-deadlineRef.current;
-          if(drift>100){const sec=Math.floor(drift/1000);if(sec>0)advanceTimer(sec);deadlineRef.current=performance.now()+1000;}
-        }
+        if(deadlineRef.current!==null&&!stateRef.current.isPaused){const drift=performance.now()-deadlineRef.current;if(drift>100){const sec=Math.floor(drift/1000);if(sec>0)advanceTimer(sec);deadlineRef.current=performance.now()+1000;}}
         await acquireWakeLock();
       }
     };
@@ -131,73 +187,82 @@ function FitnessTimer(){
     return()=>document.removeEventListener("visibilitychange",onVisible);
   },[acquireWakeLock]);
 
-  // ── Audio ─────────────────────────────────────────────────────────────────
   const getAudioCtx=useCallback(()=>{
-    if(!audioCtxRef.current||audioCtxRef.current.state==="closed")
-      audioCtxRef.current=new(window.AudioContext||window.webkitAudioContext)();
+    if(!audioCtxRef.current||audioCtxRef.current.state==="closed")audioCtxRef.current=new(window.AudioContext||window.webkitAudioContext)();
     if(audioCtxRef.current.state==="suspended")audioCtxRef.current.resume();
     return audioCtxRef.current;
   },[]);
 
-  // ── Transition logic ──────────────────────────────────────────────────────
-  // State: { phase, round, exIdx, exSet, config }
-  // Returns next state object or null if DONE
+  // ── Transition ────────────────────────────────────────────────────────────
   const applyTransition=useCallback((s,ctx)=>{
     const cfg=s.config;
-    const ex=cfg.exercises[s.exIdx];
-    const totalEx=cfg.exercises.length;
-    const isLastSet=s.exSet>=ex.sets;
-    const isLastEx=s.exIdx===totalEx-1;
+    const seq=buildSequence(cfg.items);
+    const step=seq[s.seqIdx];
     const isLastRound=s.round===cfg.rounds;
 
+    // COUNTDOWN → first exercise
     if(s.phase===PHASES.COUNTDOWN){
-      if(ctx){signalStart(ctx);speak(cfg.exercises[s.exIdx].name);}
-      return{phase:PHASES.WORK,timeLeft:cfg.exercises[s.exIdx].workSec,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
+      if(ctx){signalStart(ctx);speak(seq[0].name);}
+      return{phase:PHASES.WORK,timeLeft:seq[0].workSec,seqIdx:0,exSet:1,round:s.round};
     }
 
+    // WORK → next set, or move to next step
     if(s.phase===PHASES.WORK){
+      const isLastSet=s.exSet>=step.sets;
       if(!isLastSet){
-        // Noch mehr Durchläufe dieser Übung → Set-Pause
+        // more sets of this exercise
         if(ctx)signalRest(ctx);
-        return{phase:PHASES.REST,timeLeft:ex.restSec,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
+        return{phase:PHASES.REST,timeLeft:step.restSec,seqIdx:s.seqIdx,exSet:s.exSet,round:s.round};
       }
-      // Letzter Durchlauf dieser Übung
-      if(isLastEx&&isLastRound){
-        if(ctx){signalDone(ctx);setTimeout(()=>speak("Super, Training beendet!"),600);}
-        return{phase:PHASES.DONE,timeLeft:0,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
-      }
-      if(isLastEx){
-        // Rundenende → Runden-Pause
+      // last set done → advance to next step
+      const nextIdx=s.seqIdx+1;
+      if(nextIdx>=seq.length){
+        // end of sequence
+        if(isLastRound){if(ctx){signalDone(ctx);setTimeout(()=>speak("Super, Training beendet!"),600);}return{phase:PHASES.DONE,timeLeft:0,seqIdx:s.seqIdx,exSet:s.exSet,round:s.round};}
         if(ctx)signalRest(ctx);
-        return{phase:PHASES.ROUND_REST,timeLeft:cfg.restBetweenRounds,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
+        return{phase:PHASES.ROUND_REST,timeLeft:cfg.restBetweenRounds,seqIdx:s.seqIdx,exSet:s.exSet,round:s.round};
       }
-      // Nächste Übung → Pause, dann Ansage der nächsten Übung
-      if(ctx){signalRest(ctx);setTimeout(()=>speak("Weiter mit "+cfg.exercises[s.exIdx+1].name),400);}
-      return{phase:PHASES.SET_REST,timeLeft:ex.restSec,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
+      const nextStep=seq[nextIdx];
+      if(nextStep.kind==="break"){
+        // next item is a break between exercises
+        if(ctx){signalRest(ctx);
+          const afterBreak=seq[nextIdx+1];
+          if(afterBreak)setTimeout(()=>speak("Pause. Weiter mit "+afterBreak.name),400);
+        }
+        return{phase:PHASES.EX_BREAK,timeLeft:nextStep.durationSec,seqIdx:nextIdx,exSet:1,round:s.round};
+      }
+      // next item is an exercise directly
+      if(ctx){signalRest(ctx);setTimeout(()=>speak("Weiter mit "+nextStep.name),400);}
+      return{phase:PHASES.EX_BREAK,timeLeft:0,seqIdx:nextIdx,exSet:1,round:s.round};
     }
 
+    // REST (between sets of same exercise) → next set
     if(s.phase===PHASES.REST){
-      // Nach Set-Pause: nächster Durchlauf der gleichen Übung
       if(ctx)signalStart(ctx);
-      return{phase:PHASES.WORK,timeLeft:ex.workSec,exIdx:s.exIdx,exSet:s.exSet+1,round:s.round};
+      return{phase:PHASES.WORK,timeLeft:step.workSec,seqIdx:s.seqIdx,exSet:s.exSet+1,round:s.round};
     }
 
-    if(s.phase===PHASES.SET_REST){
-      // Nach Übungs-Pause: nächste Übung, Set 1
-      if(ctx){signalStart(ctx);speak(cfg.exercises[s.exIdx+1].name);}
-      return{phase:PHASES.WORK,timeLeft:cfg.exercises[s.exIdx+1].workSec,exIdx:s.exIdx+1,exSet:1,round:s.round};
+    // EX_BREAK → next exercise
+    if(s.phase===PHASES.EX_BREAK){
+      // seqIdx is already pointing at the next step (break or exercise)
+      // find next exercise step
+      let nextExIdx=s.seqIdx;
+      if(seq[nextExIdx]&&seq[nextExIdx].kind==="break")nextExIdx++;
+      const nextEx=seq[nextExIdx];
+      if(!nextEx)return{phase:PHASES.DONE,timeLeft:0,seqIdx:s.seqIdx,exSet:1,round:s.round};
+      if(ctx){signalStart(ctx);speak(nextEx.name);}
+      return{phase:PHASES.WORK,timeLeft:nextEx.workSec,seqIdx:nextExIdx,exSet:1,round:s.round};
     }
 
+    // ROUND_REST → new round
     if(s.phase===PHASES.ROUND_REST){
-      // Nach Runden-Pause: neue Runde, erste Übung, Set 1
-      if(ctx){signalStart(ctx);speak(cfg.exercises[0].name);}
-      return{phase:PHASES.WORK,timeLeft:cfg.exercises[0].workSec,exIdx:0,exSet:1,round:s.round+1};
+      if(ctx){signalStart(ctx);speak(seq[0].name);}
+      return{phase:PHASES.WORK,timeLeft:seq[0].workSec,seqIdx:0,exSet:1,round:s.round+1};
     }
 
     return null;
   },[]);
 
-  // ── Advance N seconds (catch-up after hidden) ─────────────────────────────
   const advanceTimer=useCallback((seconds)=>{
     let s={...stateRef.current};
     for(let i=0;i<seconds;i++){
@@ -205,14 +270,10 @@ function FitnessTimer(){
       s={...s,timeLeft:s.timeLeft-1};
       if(s.timeLeft<=0){const n=applyTransition(s,null);if(!n)break;s={...s,...n};if(s.phase===PHASES.DONE)break;}
     }
-    setPhase(s.phase);setRound(s.round);setExIdx(s.exIdx);setExSet(s.exSet);setTimeLeft(Math.max(0,s.timeLeft));
+    setPhase(s.phase);setRound(s.round);setSeqIdx(s.seqIdx);setExSet(s.exSet);setTimeLeft(Math.max(0,s.timeLeft));
   },[applyTransition]);
 
-  // ── RAF tick ──────────────────────────────────────────────────────────────
-  const stopTimer=useCallback(()=>{
-    if(rafRef.current){cancelAnimationFrame(rafRef.current);rafRef.current=null;}
-    deadlineRef.current=null;
-  },[]);
+  const stopTimer=useCallback(()=>{if(rafRef.current){cancelAnimationFrame(rafRef.current);rafRef.current=null;}deadlineRef.current=null;},[]);
 
   const tick=useCallback(()=>{
     const now=performance.now(),s=stateRef.current;
@@ -224,133 +285,129 @@ function FitnessTimer(){
       if(next>0&&next<=3&&lastBeepSecRef.current!==bk){lastBeepSecRef.current=bk;signalCountdown(getAudioCtx());}
       if(next<=0){
         const result=applyTransition(s,getAudioCtx());
-        if(result){
-          lastBeepSecRef.current=-1;
-          setPhase(result.phase);setRound(result.round);
-          setExIdx(result.exIdx);setExSet(result.exSet);
-          setTimeLeft(result.timeLeft);
-          if(result.phase===PHASES.DONE){stopTimer();return;}
-        }
+        if(result){lastBeepSecRef.current=-1;setPhase(result.phase);setRound(result.round);setSeqIdx(result.seqIdx);setExSet(result.exSet);setTimeLeft(result.timeLeft);if(result.phase===PHASES.DONE){stopTimer();return;}}
       }else{setTimeLeft(next);}
       deadlineRef.current+=1000;
     }
     rafRef.current=requestAnimationFrame(tick);
   },[getAudioCtx,applyTransition,stopTimer]);
 
-  const startTick=useCallback(()=>{
-    stopTimer();deadlineRef.current=null;lastBeepSecRef.current=-1;
-    rafRef.current=requestAnimationFrame(tick);
-  },[stopTimer,tick]);
+  const startTick=useCallback(()=>{stopTimer();deadlineRef.current=null;lastBeepSecRef.current=-1;rafRef.current=requestAnimationFrame(tick);},[stopTimer,tick]);
 
-  // ── Controls ──────────────────────────────────────────────────────────────
   const handleStart=useCallback(async()=>{
     getAudioCtx();await acquireWakeLock();
-    setRound(1);setExIdx(0);setExSet(1);setIsPaused(false);
+    setRound(1);setSeqIdx(0);setExSet(1);setIsPaused(false);
     setPhase(PHASES.COUNTDOWN);setTimeLeft(config.countdownSec);startTick();
-    // Ansage der ersten Übung während Countdown
-    setTimeout(()=>speak(config.exercises[0].name),500);
+    const seq=buildSequence(config.items);
+    if(seq[0])setTimeout(()=>speak(seq[0].name),500);
   },[config,getAudioCtx,acquireWakeLock,startTick]);
 
   const handlePause=useCallback(()=>{
-    setIsPaused(p=>{
-      if(!p){deadlineRef.current=null;}
-      else{deadlineRef.current=performance.now()+1000;}
-      return!p;
-    });
+    setIsPaused(p=>{if(!p){deadlineRef.current=null;}else{deadlineRef.current=performance.now()+1000;}return!p;});
   },[]);
 
   const handleReset=useCallback(()=>{
     stopTimer();releaseWakeLock();
     if(window.speechSynthesis)window.speechSynthesis.cancel();
-    setPhase(PHASES.IDLE);setRound(1);setExIdx(0);setExSet(1);setTimeLeft(0);setIsPaused(false);
+    setPhase(PHASES.IDLE);setRound(1);setSeqIdx(0);setExSet(1);setTimeLeft(0);setIsPaused(false);
   },[stopTimer,releaseWakeLock]);
 
   useEffect(()=>()=>{stopTimer();releaseWakeLock();},[stopTimer,releaseWakeLock]);
 
-  // ── Workout save/load ─────────────────────────────────────────────────────
+  // Workout save/load
   const handleSaveWorkout=()=>{
     if(!saveName.trim())return;
-    const workout={
-      id:Date.now(),name:saveName.trim(),
-      createdAt:new Date().toLocaleDateString("de-DE"),
-      config:{...editConfig,exercises:editConfig.exercises.map(e=>({...e}))},
-    };
-    setSavedWorkouts(prev=>[workout,...prev]);
+    setSavedWorkouts(prev=>[{id:Date.now(),name:saveName.trim(),createdAt:new Date().toLocaleDateString("de-DE"),config:{...editConfig,items:editConfig.items.map(i=>({...i}))}}, ...prev]);
     setSaveName("");setShowSaveDialog(false);
   };
-  const handleLoadWorkout=(w)=>{setEditConfig({...w.config,exercises:w.config.exercises.map(e=>({...e}))});setTab("config");};
+  const handleLoadWorkout=(w)=>{setEditConfig({...w.config,items:w.config.items.map(i=>({...i}))});setTab("config");};
   const handleDeleteWorkout=(id)=>{setSavedWorkouts(prev=>prev.filter(w=>w.id!==id));setConfirmDelete(null);};
-  const handleUseWorkout=(w)=>{setConfig({...w.config,exercises:w.config.exercises.map(e=>({...e}))});handleReset();setTab("timer");};
+  const handleUseWorkout=(w)=>{setConfig({...w.config,items:w.config.items.map(i=>({...i}))});handleReset();setTab("timer");};
+  const applyConfig=()=>{setConfig({...editConfig,items:editConfig.items.map(i=>({...i}))});handleReset();setTab("timer");};
 
-  // ── Config helpers ────────────────────────────────────────────────────────
-  const addExercise=()=>setEditConfig(c=>({...c,exercises:[...c.exercises,{name:`Übung ${c.exercises.length+1}`,workSec:20,restSec:10,sets:8}]}));
-  const removeExercise=i=>setEditConfig(c=>({...c,exercises:c.exercises.filter((_,idx)=>idx!==i)}));
-  const updateExercise=(i,field,val)=>setEditConfig(c=>({...c,exercises:c.exercises.map((ex,idx)=>idx===i?{...ex,[field]:val}:ex)}));
-  const applyConfig=()=>{setConfig({...editConfig,exercises:editConfig.exercises.map(e=>({...e}))});handleReset();setTab("timer");};
+  // Config item helpers
+  const addExercise=()=>setEditConfig(c=>({...c,items:[...c.items,{type:"exercise",name:`Übung ${totalExercises(c.items)+1}`,workSec:20,restSec:10,sets:8}]}));
+  const addBreakAfter=(idx)=>setEditConfig(c=>{
+    const items=[...c.items];
+    items.splice(idx+1,0,{type:"break",durationSec:30});
+    return{...c,items};
+  });
+  const removeItem=(idx)=>setEditConfig(c=>({...c,items:c.items.filter((_,i)=>i!==idx)}));
+  const updateItem=(idx,field,val)=>setEditConfig(c=>({...c,items:c.items.map((item,i)=>i===idx?{...item,[field]:val}:item)}));
 
-  // ── Derived display ───────────────────────────────────────────────────────
-  const currentEx=config.exercises[exIdx]||config.exercises[0];
+  // Derived display
+  const seq=buildSequence(config.items);
+  const currentStep=seq[seqIdx]||seq[0]||{kind:"exercise",name:"",workSec:20,restSec:10,sets:1,exIdx:0};
   const totalTime=
-    phase===PHASES.WORK?currentEx.workSec:
-    phase===PHASES.REST||phase===PHASES.SET_REST?currentEx.restSec:
+    phase===PHASES.WORK?currentStep.workSec:
+    phase===PHASES.REST?currentStep.restSec:
+    phase===PHASES.EX_BREAK?(seq[seqIdx]?.kind==="break"?seq[seqIdx].durationSec:0):
     phase===PHASES.ROUND_REST?config.restBetweenRounds:
     phase===PHASES.COUNTDOWN?config.countdownSec:1;
   const progress=totalTime>0?((totalTime-timeLeft)/totalTime)*100:0;
   const isRunning=phase!==PHASES.IDLE&&phase!==PHASES.DONE;
+  const totalEx=totalExercises(config.items);
+  const currentExNum=currentStep.exIdx!==undefined?currentStep.exIdx+1:1;
 
-  const phaseColor={
-    [PHASES.IDLE]:"#4ade80",[PHASES.COUNTDOWN]:"#facc15",
-    [PHASES.WORK]:"#f97316",[PHASES.REST]:"#38bdf8",
-    [PHASES.SET_REST]:"#38bdf8",[PHASES.ROUND_REST]:"#a78bfa",
-    [PHASES.DONE]:"#4ade80",
-  }[phase]||"#4ade80";
+  const phaseColor={[PHASES.IDLE]:"#22c55e",[PHASES.COUNTDOWN]:"#eab308",[PHASES.WORK]:"#f97316",[PHASES.REST]:"#0ea5e9",[PHASES.EX_BREAK]:"#a855f7",[PHASES.ROUND_REST]:"#a855f7",[PHASES.DONE]:"#22c55e"}[phase]||"#22c55e";
+  const phaseLabel={[PHASES.IDLE]:"Bereit",[PHASES.COUNTDOWN]:"Vorbereitung",[PHASES.WORK]:"ÜBUNG",[PHASES.REST]:"PAUSE",[PHASES.EX_BREAK]:"PAUSE",[PHASES.ROUND_REST]:"RUNDEN-PAUSE",[PHASES.DONE]:"FERTIG! 🎉"}[phase];
 
-  const phaseLabel={
-    [PHASES.IDLE]:"Bereit",[PHASES.COUNTDOWN]:"Vorbereitung",
-    [PHASES.WORK]:"ÜBUNG",[PHASES.REST]:"PAUSE",
-    [PHASES.SET_REST]:"PAUSE",[PHASES.ROUND_REST]:"RUNDEN-PAUSE",
-    [PHASES.DONE]:"FERTIG! 🎉",
-  }[phase];
+  const TABS=[{id:"timer",label:"▶ Timer"},{id:"config",label:"⚙ Setup"},{id:"workouts",label:`📂${savedWorkouts.length>0?` (${savedWorkouts.length})`:""}`}];
 
-  const TABS=[
-    {id:"timer",label:"▶ Timer"},
-    {id:"config",label:"⚙ Setup"},
-    {id:"workouts",label:`📂${savedWorkouts.length>0?` (${savedWorkouts.length})`:""}`},
-  ];
-
-  const btnStyle={width:44,height:44,borderRadius:10,border:"1px solid #2a2a3e",background:"#1a1a2e",color:"#f0f0f0",cursor:"pointer",fontSize:22,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1,fontFamily:"inherit",flexShrink:0};
+  const S={
+    text:{color:"var(--text)"},text2:{color:"var(--text2)"},text3:{color:"var(--text3)"},text4:{color:"var(--text4)"},
+    card:{background:"var(--bg2)",border:"1px solid var(--border2)",borderRadius:14},
+    inner:{background:"var(--bg4)",borderRadius:10},
+    border:{borderBottom:"1px solid var(--border2)"},
+  };
+  const btnBase={width:44,height:44,borderRadius:10,border:"1px solid var(--border)",background:"var(--bg3)",color:"var(--text)",cursor:"pointer",fontSize:22,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1,fontFamily:"inherit",flexShrink:0};
 
   function NumInput({value,onChange,min,max,unit}){
     return(
       <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
-        <button onClick={()=>onChange(Math.max(min,value-(value>10?5:1)))} style={btnStyle}>−</button>
+        <button onClick={()=>onChange(Math.max(min,value-(value>10?5:1)))} style={btnBase}>−</button>
         <div style={{textAlign:"center",minWidth:52}}>
-          <span style={{fontSize:22,fontWeight:700,lineHeight:1}}>{value}</span>
-          {unit&&<span style={{fontSize:12,color:"#555",marginLeft:3}}>{unit}</span>}
+          <span style={{fontSize:22,fontWeight:700,...S.text}}>{value}</span>
+          {unit&&<span style={{fontSize:12,marginLeft:3,...S.text3}}>{unit}</span>}
         </div>
-        <button onClick={()=>onChange(Math.min(max,value+(value>=10?5:1)))} style={btnStyle}>+</button>
+        <button onClick={()=>onChange(Math.min(max,value+(value>=10?5:1)))} style={btnBase}>+</button>
       </div>
     );
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  function ThemeToggle(){
+    const opts=[{v:"system",icon:"🌐"},{v:"dark",icon:"🌙"},{v:"light",icon:"☀️"}];
+    return(
+      <div style={{display:"flex",gap:4,background:"var(--bg3)",borderRadius:10,padding:3,border:"1px solid var(--border)"}}>
+        {opts.map(o=>(
+          <button key={o.v} onClick={()=>setThemePref(o.v)} style={{width:34,height:30,borderRadius:7,border:"none",cursor:"pointer",fontSize:14,background:themePref===o.v?"var(--bg2)":"transparent",boxShadow:themePref===o.v?(dark?"0 1px 4px #00000066":"0 1px 4px #00000022"):"none",transition:"all 0.2s",fontFamily:"inherit"}}>
+            {o.icon}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
   return(
-    <div style={{minHeight:"100vh",background:"#0a0a0f",color:"#f0f0f0",fontFamily:"'Courier New',monospace",display:"flex",flexDirection:"column",alignItems:"center",paddingBottom:60,userSelect:"none"}}>
+    <div style={{minHeight:"100vh",background:"var(--bg)",color:"var(--text)",display:"flex",flexDirection:"column",alignItems:"center",paddingBottom:60,userSelect:"none",transition:"background 0.3s,color 0.3s"}}>
 
       {/* Header */}
       <div style={{width:"100%",maxWidth:480,padding:"20px 20px 0",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div>
-          <div style={{fontSize:10,letterSpacing:4,color:"#555",textTransform:"uppercase"}}>Fitness</div>
-          <div style={{fontSize:20,fontWeight:700,letterSpacing:1}}>INTERVAL TIMER</div>
+          <div style={{fontSize:10,letterSpacing:4,textTransform:"uppercase",...S.text3}}>Fitness</div>
+          <div style={{fontSize:20,fontWeight:700,letterSpacing:1,...S.text}}>INTERVAL TIMER</div>
         </div>
-        {isRunning&&<div style={{fontSize:20}}>{wakeLockStatus==="active"?"🔆":wakeLockStatus==="denied"?"⚠️":"💤"}</div>}
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          {isRunning&&<div style={{fontSize:18}}>{wakeLockStatus==="active"?"🔆":wakeLockStatus==="denied"?"⚠️":""}</div>}
+          <ThemeToggle/>
+        </div>
       </div>
 
       {/* Tabs */}
       <div style={{width:"100%",maxWidth:480,padding:"16px 20px 0",display:"flex",gap:8}}>
         {TABS.map(t=>(
-          <button key={t.id} onClick={()=>{setTab(t.id);if(t.id==="config")setEditConfig({...config,exercises:config.exercises.map(e=>({...e}))});}}
-            style={{flex:1,padding:"10px 4px",borderRadius:10,border:`1px solid ${tab===t.id?"transparent":"#1e1e2e"}`,cursor:"pointer",fontSize:11,letterSpacing:1,textTransform:"uppercase",background:tab===t.id?phaseColor:"#111118",color:tab===t.id?"#0a0a0f":"#666",fontFamily:"inherit",transition:"all 0.2s"}}>
+          <button key={t.id} onClick={()=>{setTab(t.id);if(t.id==="config")setEditConfig({...config,items:config.items.map(i=>({...i}))});}}
+            style={{flex:1,padding:"10px 4px",borderRadius:10,border:`1px solid ${tab===t.id?"transparent":"var(--border2)"}`,cursor:"pointer",fontSize:11,letterSpacing:1,textTransform:"uppercase",background:tab===t.id?phaseColor:"var(--bg2)",color:tab===t.id?"#fff":"var(--text3)",fontFamily:"inherit",transition:"all 0.2s",fontWeight:tab===t.id?700:400}}>
             {t.label}
           </button>
         ))}
@@ -360,70 +417,81 @@ function FitnessTimer(){
       {tab==="timer"&&(
         <div style={{width:"100%",maxWidth:480,padding:"24px 20px 0",display:"flex",flexDirection:"column",alignItems:"center",gap:20}}>
 
-          {/* Circular timer */}
+          {/* Circle */}
           <div style={{position:"relative",width:240,height:240,margin:"8px 0"}}>
             <svg width="240" height="240" style={{transform:"rotate(-90deg)"}}>
-              <circle cx="120" cy="120" r="108" fill="none" stroke="#1a1a2e" strokeWidth="10"/>
-              <circle cx="120" cy="120" r="108" fill="none" stroke={phaseColor} strokeWidth="10" strokeLinecap="round"
+              <circle cx="120" cy="120" r="108" fill="none" stroke={dark?"#1a1a2e":"#e0e0ee"} strokeWidth="12"/>
+              <circle cx="120" cy="120" r="108" fill="none" stroke={phaseColor} strokeWidth="12" strokeLinecap="round"
                 strokeDasharray={`${2*Math.PI*108}`} strokeDashoffset={`${2*Math.PI*108*(1-progress/100)}`}
                 style={{transition:"stroke-dashoffset 0.9s linear,stroke 0.4s"}}/>
             </svg>
             <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
-              <div style={{fontSize:11,letterSpacing:3,color:phaseColor,marginBottom:4,textTransform:"uppercase"}}>{phaseLabel}</div>
-              <div style={{fontSize:phase===PHASES.DONE?36:52,fontWeight:700,lineHeight:1,letterSpacing:-2,color:"#fff"}}>
+              <div style={{fontSize:11,letterSpacing:3,color:phaseColor,marginBottom:4,textTransform:"uppercase",fontWeight:700}}>{phaseLabel}</div>
+              <div style={{fontSize:phase===PHASES.DONE?36:54,fontWeight:800,lineHeight:1,letterSpacing:-2,...S.text}}>
                 {phase===PHASES.DONE?"💪":fmtTime(Math.max(0,timeLeft))}
               </div>
               {isRunning&&phase===PHASES.WORK&&(
-                <div style={{fontSize:13,color:"#aaa",marginTop:4,textAlign:"center",maxWidth:160}}>
-                  {currentEx.name}
-                  {currentEx.sets>1&&(
-                    <span style={{color:phaseColor,marginLeft:6}}>{exSet}/{currentEx.sets}</span>
-                  )}
+                <div style={{fontSize:13,marginTop:4,textAlign:"center",maxWidth:160,...S.text2}}>
+                  {currentStep.name}
+                  {currentStep.sets>1&&<span style={{color:phaseColor,marginLeft:6,fontWeight:700}}>{exSet}/{currentStep.sets}</span>}
                 </div>
               )}
               {isRunning&&(phase===PHASES.REST)&&(
-                <div style={{fontSize:12,color:"#aaa",marginTop:4}}>
-                  Satz {exSet}/{currentEx.sets} · {currentEx.name}
-                </div>
+                <div style={{fontSize:12,marginTop:4,...S.text3}}>Satz {exSet}/{currentStep.sets} · {currentStep.name}</div>
+              )}
+              {isRunning&&phase===PHASES.EX_BREAK&&(
+                <div style={{fontSize:12,marginTop:4,...S.text3}}>Pause</div>
               )}
             </div>
           </div>
 
-          {/* Runde / Übung / Satz */}
-          <div style={{display:"flex",gap:20,justifyContent:"center"}}>
-            <div style={{textAlign:"center"}}>
-              <div style={{fontSize:10,letterSpacing:3,color:"#555",textTransform:"uppercase"}}>Runde</div>
-              <div style={{fontSize:24,fontWeight:700}}>{round}<span style={{color:"#333",fontSize:14}}>/{config.rounds}</span></div>
-            </div>
-            <div style={{width:1,background:"#1e1e2e"}}/>
-            <div style={{textAlign:"center"}}>
-              <div style={{fontSize:10,letterSpacing:3,color:"#555",textTransform:"uppercase"}}>Übung</div>
-              <div style={{fontSize:24,fontWeight:700}}>{exIdx+1}<span style={{color:"#333",fontSize:14}}>/{config.exercises.length}</span></div>
-            </div>
-            <div style={{width:1,background:"#1e1e2e"}}/>
-            <div style={{textAlign:"center"}}>
-              <div style={{fontSize:10,letterSpacing:3,color:"#555",textTransform:"uppercase"}}>Satz</div>
-              <div style={{fontSize:24,fontWeight:700,color:phaseColor}}>{exSet}<span style={{color:"#333",fontSize:14}}>/{currentEx.sets}</span></div>
-            </div>
+          {/* Stats */}
+          <div style={{display:"flex",gap:0,justifyContent:"center",width:"100%",...S.card,overflow:"hidden"}}>
+            {[["Runde",round,config.rounds],["Übung",currentExNum,totalEx],["Satz",exSet,currentStep.sets||1]].map(([label,val,max],i)=>(
+              <div key={label} style={{flex:1,textAlign:"center",padding:"12px 8px",borderRight:i<2?`1px solid var(--border2)`:"none"}}>
+                <div style={{fontSize:10,letterSpacing:3,textTransform:"uppercase",marginBottom:4,...S.text3}}>{label}</div>
+                <div style={{fontSize:22,fontWeight:800,...S.text}}>{val}<span style={{fontSize:13,fontWeight:400,...S.text4}}>/{max}</span></div>
+              </div>
+            ))}
           </div>
 
-          {/* Exercise queue */}
-          {(phase===PHASES.WORK||phase===PHASES.REST||phase===PHASES.SET_REST||phase===PHASES.IDLE)&&(
-            <div style={{width:"100%",display:"flex",flexDirection:"column",gap:8}}>
-              {config.exercises.map((ex,i)=>{
-                const isActive=i===exIdx&&isRunning;
-                const isDone=i<exIdx||(i===exIdx&&phase===PHASES.DONE);
+          {/* YouTube iframe */}
+          {config.youtubeUrl&&youtubeEmbedUrl(config.youtubeUrl)&&(
+            <div style={{width:"100%",borderRadius:14,overflow:"hidden",border:"1px solid var(--border2)",background:"#000",aspectRatio:"16/9",position:"relative"}}>
+              <iframe
+                src={youtubeEmbedUrl(config.youtubeUrl)}
+                style={{width:"100%",height:"100%",border:"none",display:"block"}}
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+              />
+            </div>
+          )}
+
+          {/* Queue – show exercises only, mark breaks */}
+          {(phase===PHASES.WORK||phase===PHASES.REST||phase===PHASES.EX_BREAK||phase===PHASES.IDLE)&&(
+            <div style={{width:"100%",display:"flex",flexDirection:"column",gap:6}}>
+              {seq.map((step,i)=>{
+                if(step.kind==="break"){
+                  const isActive=i===seqIdx&&isRunning;
+                  return(
+                    <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 14px",borderRadius:8,background:isActive?"var(--bg3)":"transparent",border:`1px dashed ${isActive?"#a855f7":"var(--border2)"}`,opacity:i<seqIdx?0.3:1,transition:"all 0.3s"}}>
+                      <div style={{fontSize:11,...S.text3,flex:1,letterSpacing:1}}>— PAUSE —</div>
+                      <div style={{fontSize:11,color:"#a855f7",fontWeight:600}}>{step.durationSec}s</div>
+                    </div>
+                  );
+                }
+                const isActive=i===seqIdx&&isRunning&&(phase===PHASES.WORK||phase===PHASES.REST);
+                const isDone=i<seqIdx&&seq[i].kind==="exercise"&&phase!==PHASES.IDLE;
                 return(
-                  <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",borderRadius:10,background:isActive?"#1a1a2e":"#111118",border:`1px solid ${isActive?phaseColor+"44":"#1e1e2e"}`,transition:"all 0.3s",opacity:isDone?0.3:1}}>
-                    <div style={{width:8,height:8,borderRadius:"50%",background:isActive?phaseColor:isDone?"#222":"#2a2a3e",flexShrink:0}}/>
-                    <div style={{flex:1,fontSize:14}}>{ex.name}</div>
-                    <div style={{fontSize:11,color:"#f97316"}}>{ex.workSec}s</div>
-                    <div style={{fontSize:11,color:"#555"}}>×{ex.sets}</div>
-                    {/* Satz-Dots für aktive Übung */}
-                    {isActive&&ex.sets>1&&(
-                      <div style={{display:"flex",gap:4}}>
-                        {Array.from({length:ex.sets}).map((_,si)=>(
-                          <div key={si} style={{width:6,height:6,borderRadius:"50%",background:si<exSet-1?"#4ade80":si===exSet-1?phaseColor:"#2a2a3e",transition:"background 0.3s"}}/>
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",borderRadius:10,background:isActive?"var(--bg3)":"var(--bg2)",border:`1px solid ${isActive?phaseColor+"88":"var(--border2)"}`,transition:"all 0.3s",opacity:isDone?0.35:1}}>
+                    <div style={{width:8,height:8,borderRadius:"50%",flexShrink:0,background:isActive?phaseColor:isDone?"var(--border)":"var(--border2)"}}/>
+                    <div style={{flex:1,fontSize:14,fontWeight:isActive?700:400,...(isActive?{color:phaseColor}:S.text)}}>{step.name}</div>
+                    <div style={{fontSize:11,color:"#f97316",fontWeight:600}}>{step.workSec}s</div>
+                    <div style={{fontSize:11,...S.text3}}>×{step.sets}</div>
+                    {isActive&&step.sets>1&&(
+                      <div style={{display:"flex",gap:3}}>
+                        {Array.from({length:step.sets}).map((_,si)=>(
+                          <div key={si} style={{width:6,height:6,borderRadius:"50%",transition:"background 0.3s",background:si<exSet-1?"#22c55e":si===exSet-1?phaseColor:"var(--border)"}}/>
                         ))}
                       </div>
                     )}
@@ -434,7 +502,7 @@ function FitnessTimer(){
           )}
 
           {wakeLockStatus==="denied"&&isRunning&&(
-            <div style={{width:"100%",padding:"10px 14px",borderRadius:10,background:"#1a1208",border:"1px solid #f97316aa",fontSize:12,color:"#f97316",lineHeight:1.5}}>
+            <div style={{width:"100%",padding:"10px 14px",borderRadius:10,background:"var(--del-bg)",border:"1px solid var(--del-border)",fontSize:12,color:"#f97316",lineHeight:1.5}}>
               ⚠️ Wake Lock nicht verfügbar — Bildschirm kann ausgehen.
             </div>
           )}
@@ -442,15 +510,15 @@ function FitnessTimer(){
           {/* Controls */}
           <div style={{display:"flex",gap:12,width:"100%"}}>
             {phase===PHASES.IDLE||phase===PHASES.DONE?(
-              <button onClick={handleStart} style={{flex:1,padding:"18px",borderRadius:14,border:"none",background:phaseColor,color:"#0a0a0f",fontSize:16,fontWeight:700,fontFamily:"inherit",cursor:"pointer",letterSpacing:2,textTransform:"uppercase",boxShadow:`0 0 32px ${phaseColor}55`}}>
-                {phase===PHASES.DONE?"Nochmal":"▶ Start"}
+              <button onClick={handleStart} style={{flex:1,padding:"18px",borderRadius:14,border:"none",background:phaseColor,color:"#fff",fontSize:16,fontWeight:800,fontFamily:"inherit",cursor:"pointer",letterSpacing:2,textTransform:"uppercase",boxShadow:`0 4px 20px ${phaseColor}55`}}>
+                {phase===PHASES.DONE?"↺ Nochmal":"▶ Start"}
               </button>
             ):(
               <>
-                <button onClick={handlePause} style={{flex:1,padding:"18px",borderRadius:14,border:`1px solid ${phaseColor}55`,background:isPaused?phaseColor:"#1a1a2e",color:isPaused?"#0a0a0f":phaseColor,fontSize:16,fontWeight:700,fontFamily:"inherit",cursor:"pointer",letterSpacing:2,textTransform:"uppercase"}}>
+                <button onClick={handlePause} style={{flex:1,padding:"18px",borderRadius:14,border:`2px solid ${phaseColor}`,background:isPaused?phaseColor:"transparent",color:isPaused?"#fff":phaseColor,fontSize:16,fontWeight:800,fontFamily:"inherit",cursor:"pointer",letterSpacing:2,textTransform:"uppercase"}}>
                   {isPaused?"▶ Weiter":"⏸ Pause"}
                 </button>
-                <button onClick={handleReset} style={{padding:"18px 20px",borderRadius:14,border:"1px solid #2a2a3e",background:"#111118",color:"#666",fontSize:16,fontWeight:700,fontFamily:"inherit",cursor:"pointer"}}>↺</button>
+                <button onClick={handleReset} style={{padding:"18px 20px",borderRadius:14,border:"1px solid var(--border)",background:"var(--bg2)",...S.text3,fontSize:18,fontFamily:"inherit",cursor:"pointer"}}>↺</button>
               </>
             )}
           </div>
@@ -460,83 +528,120 @@ function FitnessTimer(){
       {/* ══ CONFIG TAB ══ */}
       {tab==="config"&&(
         <div style={{width:"100%",maxWidth:480,padding:"24px 20px 0",display:"flex",flexDirection:"column",gap:20}}>
+
+          {/* General */}
           <div>
-            <div style={{fontSize:10,letterSpacing:4,color:"#555",textTransform:"uppercase",marginBottom:12}}>Allgemein</div>
-            <div style={{background:"#111118",borderRadius:14,padding:"16px",border:"1px solid #1e1e2e"}}>
-              {[
-                ["Runden",editConfig.rounds,1,20,undefined,v=>setEditConfig(c=>({...c,rounds:v}))],
+            <div style={{fontSize:10,letterSpacing:4,textTransform:"uppercase",marginBottom:12,...S.text3}}>Allgemein</div>
+            <div style={{...S.card,padding:"4px 16px"}}>
+              {[["Runden",editConfig.rounds,1,20,undefined,v=>setEditConfig(c=>({...c,rounds:v}))],
                 ["Pause zwischen Runden",editConfig.restBetweenRounds,5,300,"s",v=>setEditConfig(c=>({...c,restBetweenRounds:v}))],
-                ["Vorbereitung",editConfig.countdownSec,3,30,"s",v=>setEditConfig(c=>({...c,countdownSec:v}))],
+                ["Vorbereitung",editConfig.countdownSec,3,30,"s",v=>setEditConfig(c=>({...c,countdownSec:v}))]
               ].map(([label,val,min,max,unit,onChange],li)=>(
-                <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:li<2?"1px solid #1e1e2e":"none"}}>
-                  <div style={{fontSize:13,color:"#888"}}>{label}</div>
+                <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 0",borderBottom:li<2?"1px solid var(--border2)":"none"}}>
+                  <div style={{fontSize:14,...S.text2}}>{label}</div>
                   <NumInput value={val} min={min} max={max} unit={unit} onChange={onChange}/>
                 </div>
               ))}
+              {/* YouTube URL */}
+              <div style={{padding:"14px 0"}}>
+                <div style={{fontSize:14,marginBottom:10,...S.text2,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span>▶ YouTube-Video</span>
+                  {editConfig.youtubeUrl&&youtubeEmbedUrl(editConfig.youtubeUrl)&&(
+                    <span style={{fontSize:11,color:"#22c55e"}}>✓ Gültiger Link</span>
+                  )}
+                  {editConfig.youtubeUrl&&!youtubeEmbedUrl(editConfig.youtubeUrl)&&(
+                    <span style={{fontSize:11,color:"#f97316"}}>⚠ Ungültiger Link</span>
+                  )}
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <input
+                    value={editConfig.youtubeUrl||""}
+                    onChange={e=>setEditConfig(c=>({...c,youtubeUrl:e.target.value}))}
+                    placeholder="https://youtu.be/... (optional)"
+                    style={{flex:1,background:"var(--bg4)",border:"1px solid var(--border)",borderRadius:10,color:"var(--text)",fontSize:13,fontFamily:"inherit",padding:"12px",outline:"none"}}
+                  />
+                  {editConfig.youtubeUrl&&(
+                    <button onClick={()=>setEditConfig(c=>({...c,youtubeUrl:""}))}
+                      style={{background:"var(--del-bg)",border:"1px solid var(--del-border)",borderRadius:8,color:"#f97316",cursor:"pointer",fontSize:14,width:40,height:40,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>✕</button>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
 
+          {/* Exercises + breaks interleaved */}
           <div>
-            <div style={{fontSize:10,letterSpacing:4,color:"#555",textTransform:"uppercase",marginBottom:12}}>Übungen</div>
-            {editConfig.exercises.map((ex,i)=>(
-              <div key={i} style={{background:"#111118",borderRadius:14,padding:"16px",border:"1px solid #1e1e2e",marginBottom:12}}>
-                {/* Name + delete */}
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-                  <input value={ex.name} onChange={e=>updateExercise(i,"name",e.target.value)}
-                    style={{background:"transparent",border:"none",borderBottom:"1px solid #2a2a3e",color:"#f0f0f0",fontSize:16,fontFamily:"inherit",fontWeight:700,flex:1,outline:"none",padding:"4px 0",marginRight:12}}/>
-                  {editConfig.exercises.length>1&&(
-                    <button onClick={()=>removeExercise(i)} style={{background:"#1a0a0a",border:"1px solid #f9731644",borderRadius:8,color:"#f97316",cursor:"pointer",fontSize:14,width:40,height:40,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>✕</button>
+            <div style={{fontSize:10,letterSpacing:4,textTransform:"uppercase",marginBottom:12,...S.text3}}>Übungen & Pausen</div>
+
+            {editConfig.items.map((item,idx)=>{
+              if(item.type==="break"){
+                return(
+                  <div key={idx} style={{display:"flex",alignItems:"center",gap:10,marginBottom:10,padding:"10px 14px",borderRadius:10,...S.card,border:"1px dashed var(--border)"}}>
+                    <div style={{fontSize:18}}>☕</div>
+                    <div style={{flex:1,fontSize:12,...S.text3,letterSpacing:1,textTransform:"uppercase"}}>Pause zwischen Übungen</div>
+                    <NumInput value={item.durationSec} min={5} max={300} unit="s" onChange={v=>updateItem(idx,"durationSec",v)}/>
+                    <button onClick={()=>removeItem(idx)} style={{background:"var(--del-bg)",border:"1px solid var(--del-border)",borderRadius:8,color:"#f97316",cursor:"pointer",fontSize:14,width:40,height:40,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>✕</button>
+                  </div>
+                );
+              }
+              // Exercise card
+              const hasBreakAfter=editConfig.items[idx+1]?.type==="break";
+              return(
+                <div key={idx} style={{marginBottom:6}}>
+                  <div style={{...S.card,padding:"16px",marginBottom:6}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                      <input value={item.name} onChange={e=>updateItem(idx,"name",e.target.value)}
+                        style={{background:"transparent",border:"none",borderBottom:"2px solid var(--border)",color:"var(--text)",fontSize:16,fontFamily:"inherit",fontWeight:700,flex:1,outline:"none",padding:"4px 0",marginRight:12}}/>
+                      <button onClick={()=>removeItem(idx)} style={{background:"var(--del-bg)",border:"1px solid var(--del-border)",borderRadius:8,color:"#f97316",cursor:"pointer",fontSize:14,width:40,height:40,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>✕</button>
+                    </div>
+                    {[["Sätze","#22c55e",item.sets,1,20,v=>updateItem(idx,"sets",v),undefined],
+                      ["Dauer","#f97316",item.workSec,5,600,v=>updateItem(idx,"workSec",v),"s"],
+                      ["Pause","#0ea5e9",item.restSec,0,300,v=>updateItem(idx,"restSec",v),"s"]
+                    ].map(([label,color,val,min,max,onChange,unit],ri)=>(
+                      <div key={label} style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:ri<2?8:0,...S.inner,padding:"12px 14px"}}>
+                        <div style={{fontSize:11,letterSpacing:2,color,textTransform:"uppercase",width:80,flexShrink:0,fontWeight:700}}>{label}</div>
+                        <NumInput value={val} min={min} max={max} onChange={onChange} unit={unit}/>
+                      </div>
+                    ))}
+                    <div style={{marginTop:10,fontSize:11,textAlign:"right",...S.text4}}>
+                      {item.sets}× {item.workSec}s / {item.restSec}s Pause · <span style={S.text3}>{Math.ceil((item.sets*item.workSec+(item.sets-1)*item.restSec)/60)} min</span>
+                    </div>
+                  </div>
+                  {/* Add break button – only if no break already follows */}
+                  {!hasBreakAfter&&(
+                    <button onClick={()=>addBreakAfter(idx)} style={{width:"100%",padding:"8px",borderRadius:8,border:"1px dashed var(--border)",background:"none",color:"#a855f7",fontSize:12,fontFamily:"inherit",cursor:"pointer",letterSpacing:1,marginBottom:6}}>
+                      ☕ Pause einfügen
+                    </button>
                   )}
                 </div>
-                {/* Durchläufe */}
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,background:"#0d0d18",borderRadius:10,padding:"12px 14px"}}>
-                  <div style={{fontSize:11,letterSpacing:2,color:"#4ade80",textTransform:"uppercase",width:80,flexShrink:0}}>Sätze</div>
-                  <NumInput value={ex.sets} min={1} max={20} onChange={v=>updateExercise(i,"sets",v)}/>
-                </div>
-                {/* Arbeit */}
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,background:"#0d0d18",borderRadius:10,padding:"12px 14px"}}>
-                  <div style={{fontSize:11,letterSpacing:2,color:"#f97316",textTransform:"uppercase",width:80,flexShrink:0}}>Dauer</div>
-                  <NumInput value={ex.workSec} min={5} max={600} onChange={v=>updateExercise(i,"workSec",v)} unit="s"/>
-                </div>
-                {/* Pause */}
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#0d0d18",borderRadius:10,padding:"12px 14px"}}>
-                  <div style={{fontSize:11,letterSpacing:2,color:"#38bdf8",textTransform:"uppercase",width:80,flexShrink:0}}>Pause</div>
-                  <NumInput value={ex.restSec} min={0} max={300} onChange={v=>updateExercise(i,"restSec",v)} unit="s"/>
-                </div>
-                {/* Summary */}
-                <div style={{marginTop:10,fontSize:11,color:"#444",textAlign:"right"}}>
-                  {ex.sets}× {ex.workSec}s Dauer / {ex.restSec}s Pause
-                  {" · "}
-                  <span style={{color:"#555"}}>{Math.ceil((ex.sets*ex.workSec+(ex.sets-1)*ex.restSec)/60)} min</span>
-                </div>
-              </div>
-            ))}
-            <button onClick={addExercise} style={{width:"100%",padding:"12px",borderRadius:10,border:"1px dashed #2a2a3e",background:"none",color:"#4ade80",fontSize:13,fontFamily:"inherit",cursor:"pointer",letterSpacing:2}}>
+              );
+            })}
+
+            <button onClick={addExercise} style={{width:"100%",padding:"14px",borderRadius:10,border:"2px dashed var(--border)",background:"none",color:"#22c55e",fontSize:13,fontFamily:"inherit",cursor:"pointer",letterSpacing:2,fontWeight:700}}>
               + Übung hinzufügen
             </button>
           </div>
 
           <div style={{display:"flex",gap:10}}>
-            <button onClick={()=>setShowSaveDialog(true)} style={{flex:1,padding:"16px",borderRadius:14,border:"1px solid #2a2a3e",background:"#111118",color:"#a78bfa",fontSize:13,fontWeight:700,fontFamily:"inherit",cursor:"pointer",letterSpacing:1}}>
+            <button onClick={()=>setShowSaveDialog(true)} style={{flex:1,padding:"16px",borderRadius:14,border:"2px solid #a855f7",background:"transparent",color:"#a855f7",fontSize:13,fontWeight:700,fontFamily:"inherit",cursor:"pointer",letterSpacing:1}}>
               💾 Speichern
             </button>
-            <button onClick={applyConfig} style={{flex:2,padding:"16px",borderRadius:14,border:"none",background:"#4ade80",color:"#0a0a0f",fontSize:14,fontWeight:700,fontFamily:"inherit",cursor:"pointer",letterSpacing:2,textTransform:"uppercase",boxShadow:"0 0 24px #4ade8044"}}>
+            <button onClick={applyConfig} style={{flex:2,padding:"16px",borderRadius:14,border:"none",background:"#22c55e",color:"#fff",fontSize:14,fontWeight:800,fontFamily:"inherit",cursor:"pointer",letterSpacing:2,textTransform:"uppercase",boxShadow:"0 4px 20px #22c55e44"}}>
               ✓ Anwenden
             </button>
           </div>
 
-          {/* Save dialog */}
           {showSaveDialog&&(
-            <div style={{position:"fixed",inset:0,background:"#000000cc",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:100,padding:"0 0 40px 0"}}>
-              <div style={{width:"100%",maxWidth:480,background:"#111118",borderRadius:"20px 20px 0 0",padding:"28px 24px",border:"1px solid #2a2a3e"}}>
-                <div style={{fontSize:16,fontWeight:700,marginBottom:20}}>Training speichern</div>
+            <div style={{position:"fixed",inset:0,background:"var(--overlay)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:100,padding:"0 0 40px 0"}}>
+              <div style={{width:"100%",maxWidth:480,...S.card,borderRadius:"20px 20px 0 0",padding:"28px 24px"}}>
+                <div style={{fontSize:16,fontWeight:700,marginBottom:20,...S.text}}>Training speichern</div>
                 <input autoFocus value={saveName} onChange={e=>setSaveName(e.target.value)}
                   onKeyDown={e=>e.key==="Enter"&&handleSaveWorkout()}
                   placeholder="Name des Trainings…"
-                  style={{width:"100%",background:"#0d0d18",border:"1px solid #2a2a3e",borderRadius:10,color:"#f0f0f0",fontSize:16,fontFamily:"inherit",padding:"14px",outline:"none",boxSizing:"border-box",marginBottom:16}}/>
+                  style={{width:"100%",background:"var(--bg4)",border:"1px solid var(--border)",borderRadius:10,color:"var(--text)",fontSize:16,fontFamily:"inherit",padding:"14px",outline:"none",boxSizing:"border-box",marginBottom:16}}/>
                 <div style={{display:"flex",gap:10}}>
-                  <button onClick={()=>{setShowSaveDialog(false);setSaveName("");}} style={{flex:1,padding:"14px",borderRadius:12,border:"1px solid #2a2a3e",background:"none",color:"#666",fontSize:14,fontFamily:"inherit",cursor:"pointer"}}>Abbrechen</button>
-                  <button onClick={handleSaveWorkout} disabled={!saveName.trim()} style={{flex:2,padding:"14px",borderRadius:12,border:"none",background:saveName.trim()?"#a78bfa":"#2a2a3e",color:saveName.trim()?"#0a0a0f":"#555",fontSize:14,fontWeight:700,fontFamily:"inherit",cursor:saveName.trim()?"pointer":"default"}}>
+                  <button onClick={()=>{setShowSaveDialog(false);setSaveName("");}} style={{flex:1,padding:"14px",borderRadius:12,border:"1px solid var(--border)",background:"none",...S.text3,fontSize:14,fontFamily:"inherit",cursor:"pointer"}}>Abbrechen</button>
+                  <button onClick={handleSaveWorkout} disabled={!saveName.trim()} style={{flex:2,padding:"14px",borderRadius:12,border:"none",background:saveName.trim()?"#a855f7":"var(--bg3)",color:saveName.trim()?"#fff":"var(--text4)",fontSize:14,fontWeight:700,fontFamily:"inherit",cursor:saveName.trim()?"pointer":"default"}}>
                     💾 Speichern
                   </button>
                 </div>
@@ -550,39 +655,39 @@ function FitnessTimer(){
       {tab==="workouts"&&(
         <div style={{width:"100%",maxWidth:480,padding:"24px 20px 0",display:"flex",flexDirection:"column",gap:12}}>
           {savedWorkouts.length===0?(
-            <div style={{textAlign:"center",padding:"60px 20px",color:"#444"}}>
+            <div style={{textAlign:"center",padding:"60px 20px",...S.text4}}>
               <div style={{fontSize:40,marginBottom:16}}>📂</div>
-              <div style={{fontSize:14,lineHeight:1.8}}>Noch keine Trainings gespeichert.<br/>Setup → 💾 Speichern</div>
+              <div style={{fontSize:14,lineHeight:1.8,...S.text3}}>Noch keine Trainings gespeichert.<br/>Setup → 💾 Speichern</div>
             </div>
           ):savedWorkouts.map(w=>(
-            <div key={w.id} style={{background:"#111118",borderRadius:14,padding:"16px",border:"1px solid #1e1e2e"}}>
+            <div key={w.id} style={{...S.card,padding:"16px"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
                 <div>
-                  <div style={{fontSize:16,fontWeight:700,marginBottom:2}}>{w.name}</div>
-                  <div style={{fontSize:11,color:"#555"}}>
-                    {w.createdAt} · {w.config.exercises.length} Übungen · {w.config.rounds} Runden · ⏱ ca. {Math.ceil(totalWorkoutSec(w.config)/60)} min
+                  <div style={{fontSize:16,fontWeight:700,marginBottom:2,...S.text}}>{w.name}</div>
+                  <div style={{fontSize:11,...S.text3}}>
+                    {w.createdAt} · {totalExercises(w.config.items)} Übungen · {w.config.rounds} Runden · ⏱ ca. {Math.ceil(totalWorkoutSec(w.config)/60)} min
                   </div>
                 </div>
-                <button onClick={()=>setConfirmDelete(w.id)} style={{background:"none",border:"none",color:"#333",cursor:"pointer",fontSize:18,padding:"0 0 0 8px"}}>✕</button>
+                <button onClick={()=>setConfirmDelete(w.id)} style={{background:"none",border:"none",...S.text4,cursor:"pointer",fontSize:18,padding:"0 0 0 8px"}}>✕</button>
               </div>
               <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12}}>
-                {w.config.exercises.map((ex,i)=>(
-                  <div key={i} style={{fontSize:11,padding:"4px 10px",borderRadius:20,background:"#1a1a2e",color:"#aaa",border:"1px solid #2a2a3e"}}>
-                    {ex.name} <span style={{color:"#f97316"}}>{ex.workSec}s</span>
-                    {(ex.sets||1)>1&&<span style={{color:"#4ade80"}}>×{ex.sets}</span>}
+                {w.config.items.filter(x=>x.type==="exercise").map((ex,i)=>(
+                  <div key={i} style={{fontSize:11,padding:"4px 10px",borderRadius:20,background:"var(--bg3)",...S.text2,border:"1px solid var(--border)"}}>
+                    {ex.name} <span style={{color:"#f97316",fontWeight:700}}>{ex.workSec}s</span>
+                    {(ex.sets||1)>1&&<span style={{color:"#22c55e",fontWeight:700}}>×{ex.sets}</span>}
                   </div>
                 ))}
               </div>
               <div style={{display:"flex",gap:8}}>
-                <button onClick={()=>handleLoadWorkout(w)} style={{flex:1,padding:"12px",borderRadius:10,border:"1px solid #2a2a3e",background:"#1a1a2e",color:"#a78bfa",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>✏️ Bearbeiten</button>
-                <button onClick={()=>handleUseWorkout(w)} style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:"#f97316",color:"#0a0a0f",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>▶ Direkt starten</button>
+                <button onClick={()=>handleLoadWorkout(w)} style={{flex:1,padding:"12px",borderRadius:10,border:"2px solid #a855f7",background:"transparent",color:"#a855f7",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>✏️ Bearbeiten</button>
+                <button onClick={()=>handleUseWorkout(w)} style={{flex:2,padding:"12px",borderRadius:10,border:"none",background:"#f97316",color:"#fff",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>▶ Direkt starten</button>
               </div>
               {confirmDelete===w.id&&(
-                <div style={{marginTop:12,padding:"14px",background:"#1a0808",borderRadius:10,border:"1px solid #f9731644"}}>
-                  <div style={{fontSize:13,marginBottom:12,color:"#f97316"}}>„{w.name}" wirklich löschen?</div>
+                <div style={{marginTop:12,padding:"14px",background:"var(--del-bg)",borderRadius:10,border:"1px solid var(--del-border)"}}>
+                  <div style={{fontSize:13,marginBottom:12,color:"#f97316",fontWeight:700}}>„{w.name}" wirklich löschen?</div>
                   <div style={{display:"flex",gap:8}}>
-                    <button onClick={()=>setConfirmDelete(null)} style={{flex:1,padding:"10px",borderRadius:8,border:"1px solid #2a2a3e",background:"none",color:"#888",fontSize:12,fontFamily:"inherit",cursor:"pointer"}}>Nein</button>
-                    <button onClick={()=>handleDeleteWorkout(w.id)} style={{flex:1,padding:"10px",borderRadius:8,border:"none",background:"#f97316",color:"#0a0a0f",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>Ja, löschen</button>
+                    <button onClick={()=>setConfirmDelete(null)} style={{flex:1,padding:"10px",borderRadius:8,border:"1px solid var(--border)",background:"none",...S.text3,fontSize:12,fontFamily:"inherit",cursor:"pointer"}}>Nein</button>
+                    <button onClick={()=>handleDeleteWorkout(w.id)} style={{flex:1,padding:"10px",borderRadius:8,border:"none",background:"#f97316",color:"#fff",fontSize:12,fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>Ja, löschen</button>
                   </div>
                 </div>
               )}
