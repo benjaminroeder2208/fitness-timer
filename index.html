@@ -12,7 +12,7 @@
 <style>
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
   body{margin:0;padding:0;background:#0a0a0f;font-family:'Courier New',monospace;overscroll-behavior:none;}
-  input{font-size:16px!important;} /* prevent iOS zoom */
+  input{font-size:16px!important;}
   button{touch-action:manipulation;}
 </style>
 </head>
@@ -21,6 +21,7 @@
 <script type="text/babel">
 const {useState,useEffect,useRef,useCallback}=React;
 
+// ── Audio ─────────────────────────────────────────────────────────────────────
 function createBeep(ctx,freq,dur,vol=0.6){
   const osc=ctx.createOscillator(),gain=ctx.createGain();
   osc.connect(gain);gain.connect(ctx.destination);
@@ -34,27 +35,38 @@ function signalRest(ctx){createBeep(ctx,660,0.15,0.5);setTimeout(()=>createBeep(
 function signalCountdown(ctx){createBeep(ctx,700,0.1,0.4);}
 function signalDone(ctx){[0,150,300,500].forEach((t,i)=>setTimeout(()=>createBeep(ctx,[880,1100,880,1320][i],0.2,0.7),t));}
 
+// ── Defaults ──────────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG={
-  rounds:3,
+  rounds:1,
   exercises:[
-    {name:"Burpees",workSec:40,restSec:20},
-    {name:"Jumping Jacks",workSec:30,restSec:15},
-    {name:"Plank",workSec:45,restSec:20},
+    {name:"Burpees",      workSec:20,restSec:10,sets:8},
+    {name:"Jumping Jacks",workSec:20,restSec:10,sets:8},
+    {name:"Plank",        workSec:20,restSec:10,sets:8},
+    {name:"Squats",       workSec:20,restSec:10,sets:8},
+    {name:"Lunges",       workSec:20,restSec:10,sets:8},
   ],
   restBetweenRounds:60,
-  countdownSec:5,
+  countdownSec:20,
 };
-const PHASES={IDLE:"idle",COUNTDOWN:"countdown",WORK:"work",REST:"rest",ROUND_REST:"round_rest",DONE:"done"};
+
+// Phase-Konstanten
+// exSet = aktueller Durchlauf (1-basiert) der aktuellen Übung
+const PHASES={IDLE:"idle",COUNTDOWN:"countdown",WORK:"work",REST:"rest",SET_REST:"set_rest",ROUND_REST:"round_rest",DONE:"done"};
+
 function pad(n){return String(n).padStart(2,"0");}
 function fmtTime(s){return `${pad(Math.floor(s/60))}:${pad(s%60)}`;}
 function totalWorkoutSec(cfg){
-  const perEx=cfg.exercises.reduce((s,e)=>s+e.workSec+e.restSec,0);
-  return perEx*cfg.rounds+(cfg.rounds-1)*cfg.restBetweenRounds;
+  // Pro Runde: für jede Übung: sets × workSec + (sets-1) × restSec (Pause nach letztem Set entfällt)
+  const perRound=cfg.exercises.reduce((sum,e)=>sum+e.sets*e.workSec+(e.sets-1)*e.restSec,0);
+  return perRound*cfg.rounds+(cfg.rounds-1)*cfg.restBetweenRounds;
 }
-const STORAGE_KEY="fitness-timer-workouts";
+
+// ── Storage ───────────────────────────────────────────────────────────────────
+const STORAGE_KEY="fitness-timer-workouts-v2";
 function loadWorkouts(){try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]");}catch{return[];}}
 function saveWorkoutsToStorage(list){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(list));}catch{}}
 
+// ── App ───────────────────────────────────────────────────────────────────────
 function FitnessTimer(){
   const [tab,setTab]=useState("timer");
   const [config,setConfig]=useState(DEFAULT_CONFIG);
@@ -63,9 +75,12 @@ function FitnessTimer(){
   const [showSaveDialog,setShowSaveDialog]=useState(false);
   const [saveName,setSaveName]=useState("");
   const [confirmDelete,setConfirmDelete]=useState(null);
+
+  // Timer state
   const [phase,setPhase]=useState(PHASES.IDLE);
-  const [round,setRound]=useState(1);
-  const [exIdx,setExIdx]=useState(0);
+  const [round,setRound]=useState(1);       // aktueller Runden-Index (1-basiert)
+  const [exIdx,setExIdx]=useState(0);       // aktueller Übungs-Index
+  const [exSet,setExSet]=useState(1);       // aktueller Durchlauf der Übung (1-basiert)
   const [timeLeft,setTimeLeft]=useState(0);
   const [isPaused,setIsPaused]=useState(false);
   const [wakeLockStatus,setWakeLockStatus]=useState("idle");
@@ -77,9 +92,10 @@ function FitnessTimer(){
   const deadlineRef=useRef(null);
   const lastBeepSecRef=useRef(-1);
 
-  useEffect(()=>{stateRef.current={phase,round,exIdx,timeLeft,isPaused,config};});
+  useEffect(()=>{stateRef.current={phase,round,exIdx,exSet,timeLeft,isPaused,config};});
   useEffect(()=>{saveWorkoutsToStorage(savedWorkouts);},[savedWorkouts]);
 
+  // ── Wake Lock ─────────────────────────────────────────────────────────────
   const acquireWakeLock=useCallback(async()=>{
     if(!("wakeLock" in navigator)){setWakeLockStatus("denied");return;}
     try{
@@ -92,6 +108,21 @@ function FitnessTimer(){
     wakeLockRef.current?.release();wakeLockRef.current=null;setWakeLockStatus("idle");
   },[]);
 
+  useEffect(()=>{
+    const onVisible=async()=>{
+      if(document.visibilityState==="visible"&&stateRef.current.phase!==PHASES.IDLE&&stateRef.current.phase!==PHASES.DONE){
+        if(deadlineRef.current!==null&&!stateRef.current.isPaused){
+          const drift=performance.now()-deadlineRef.current;
+          if(drift>100){const sec=Math.floor(drift/1000);if(sec>0)advanceTimer(sec);deadlineRef.current=performance.now()+1000;}
+        }
+        await acquireWakeLock();
+      }
+    };
+    document.addEventListener("visibilitychange",onVisible);
+    return()=>document.removeEventListener("visibilitychange",onVisible);
+  },[acquireWakeLock]);
+
+  // ── Audio ─────────────────────────────────────────────────────────────────
   const getAudioCtx=useCallback(()=>{
     if(!audioCtxRef.current||audioCtxRef.current.state==="closed")
       audioCtxRef.current=new(window.AudioContext||window.webkitAudioContext)();
@@ -99,20 +130,65 @@ function FitnessTimer(){
     return audioCtxRef.current;
   },[]);
 
+  // ── Transition logic ──────────────────────────────────────────────────────
+  // State: { phase, round, exIdx, exSet, config }
+  // Returns next state object or null if DONE
   const applyTransition=useCallback((s,ctx)=>{
-    const cfg=s.config,total=cfg.exercises.length;
-    if(s.phase===PHASES.COUNTDOWN){if(ctx)signalStart(ctx);return{phase:PHASES.WORK,timeLeft:cfg.exercises[s.exIdx].workSec,exIdx:s.exIdx,round:s.round};}
-    if(s.phase===PHASES.WORK){
-      const lastEx=s.exIdx===total-1,lastRound=s.round===cfg.rounds;
-      if(lastEx&&lastRound){if(ctx)signalDone(ctx);return{phase:PHASES.DONE,timeLeft:0,exIdx:s.exIdx,round:s.round};}
-      if(lastEx){if(ctx)signalRest(ctx);return{phase:PHASES.ROUND_REST,timeLeft:cfg.restBetweenRounds,exIdx:s.exIdx,round:s.round};}
-      if(ctx)signalRest(ctx);return{phase:PHASES.REST,timeLeft:cfg.exercises[s.exIdx].restSec,exIdx:s.exIdx,round:s.round};
+    const cfg=s.config;
+    const ex=cfg.exercises[s.exIdx];
+    const totalEx=cfg.exercises.length;
+    const isLastSet=s.exSet>=ex.sets;
+    const isLastEx=s.exIdx===totalEx-1;
+    const isLastRound=s.round===cfg.rounds;
+
+    if(s.phase===PHASES.COUNTDOWN){
+      if(ctx)signalStart(ctx);
+      return{phase:PHASES.WORK,timeLeft:cfg.exercises[s.exIdx].workSec,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
     }
-    if(s.phase===PHASES.REST){const n=s.exIdx+1;if(ctx)signalStart(ctx);return{phase:PHASES.WORK,timeLeft:cfg.exercises[n].workSec,exIdx:n,round:s.round};}
-    if(s.phase===PHASES.ROUND_REST){if(ctx)signalStart(ctx);return{phase:PHASES.WORK,timeLeft:cfg.exercises[0].workSec,exIdx:0,round:s.round+1};}
+
+    if(s.phase===PHASES.WORK){
+      if(!isLastSet){
+        // Noch mehr Durchläufe dieser Übung → Set-Pause
+        if(ctx)signalRest(ctx);
+        return{phase:PHASES.REST,timeLeft:ex.restSec,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
+      }
+      // Letzter Durchlauf dieser Übung
+      if(isLastEx&&isLastRound){
+        if(ctx)signalDone(ctx);
+        return{phase:PHASES.DONE,timeLeft:0,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
+      }
+      if(isLastEx){
+        // Rundenende → Runden-Pause
+        if(ctx)signalRest(ctx);
+        return{phase:PHASES.ROUND_REST,timeLeft:cfg.restBetweenRounds,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
+      }
+      // Nächste Übung → kurze Pause (restSec der aktuellen Übung als Übergangspause)
+      if(ctx)signalRest(ctx);
+      return{phase:PHASES.SET_REST,timeLeft:ex.restSec,exIdx:s.exIdx,exSet:s.exSet,round:s.round};
+    }
+
+    if(s.phase===PHASES.REST){
+      // Nach Set-Pause: nächster Durchlauf der gleichen Übung
+      if(ctx)signalStart(ctx);
+      return{phase:PHASES.WORK,timeLeft:ex.workSec,exIdx:s.exIdx,exSet:s.exSet+1,round:s.round};
+    }
+
+    if(s.phase===PHASES.SET_REST){
+      // Nach Übungs-Pause: nächste Übung, Set 1
+      if(ctx)signalStart(ctx);
+      return{phase:PHASES.WORK,timeLeft:cfg.exercises[s.exIdx+1].workSec,exIdx:s.exIdx+1,exSet:1,round:s.round};
+    }
+
+    if(s.phase===PHASES.ROUND_REST){
+      // Nach Runden-Pause: neue Runde, erste Übung, Set 1
+      if(ctx)signalStart(ctx);
+      return{phase:PHASES.WORK,timeLeft:cfg.exercises[0].workSec,exIdx:0,exSet:1,round:s.round+1};
+    }
+
     return null;
   },[]);
 
+  // ── Advance N seconds (catch-up after hidden) ─────────────────────────────
   const advanceTimer=useCallback((seconds)=>{
     let s={...stateRef.current};
     for(let i=0;i<seconds;i++){
@@ -120,9 +196,10 @@ function FitnessTimer(){
       s={...s,timeLeft:s.timeLeft-1};
       if(s.timeLeft<=0){const n=applyTransition(s,null);if(!n)break;s={...s,...n};if(s.phase===PHASES.DONE)break;}
     }
-    setPhase(s.phase);setRound(s.round);setExIdx(s.exIdx);setTimeLeft(Math.max(0,s.timeLeft));
+    setPhase(s.phase);setRound(s.round);setExIdx(s.exIdx);setExSet(s.exSet);setTimeLeft(Math.max(0,s.timeLeft));
   },[applyTransition]);
 
+  // ── RAF tick ──────────────────────────────────────────────────────────────
   const stopTimer=useCallback(()=>{
     if(rafRef.current){cancelAnimationFrame(rafRef.current);rafRef.current=null;}
     deadlineRef.current=null;
@@ -138,49 +215,54 @@ function FitnessTimer(){
       if(next>0&&next<=3&&lastBeepSecRef.current!==bk){lastBeepSecRef.current=bk;signalCountdown(getAudioCtx());}
       if(next<=0){
         const result=applyTransition(s,getAudioCtx());
-        if(result){lastBeepSecRef.current=-1;setPhase(result.phase);setRound(result.round);setExIdx(result.exIdx);setTimeLeft(result.timeLeft);if(result.phase===PHASES.DONE){stopTimer();return;}}
+        if(result){
+          lastBeepSecRef.current=-1;
+          setPhase(result.phase);setRound(result.round);
+          setExIdx(result.exIdx);setExSet(result.exSet);
+          setTimeLeft(result.timeLeft);
+          if(result.phase===PHASES.DONE){stopTimer();return;}
+        }
       }else{setTimeLeft(next);}
       deadlineRef.current+=1000;
     }
     rafRef.current=requestAnimationFrame(tick);
   },[getAudioCtx,applyTransition,stopTimer]);
 
-  const startTick=useCallback(()=>{stopTimer();deadlineRef.current=null;lastBeepSecRef.current=-1;rafRef.current=requestAnimationFrame(tick);},[stopTimer,tick]);
+  const startTick=useCallback(()=>{
+    stopTimer();deadlineRef.current=null;lastBeepSecRef.current=-1;
+    rafRef.current=requestAnimationFrame(tick);
+  },[stopTimer,tick]);
 
-  useEffect(()=>{
-    const onVisible=async()=>{
-      if(document.visibilityState==="visible"&&stateRef.current.phase!==PHASES.IDLE&&stateRef.current.phase!==PHASES.DONE){
-        if(deadlineRef.current!==null&&!stateRef.current.isPaused){
-          const drift=performance.now()-deadlineRef.current;
-          if(drift>100){const s=Math.floor(drift/1000);if(s>0)advanceTimer(s);deadlineRef.current=performance.now()+1000;}
-        }
-        await acquireWakeLock();
-      }
-    };
-    document.addEventListener("visibilitychange",onVisible);
-    return()=>document.removeEventListener("visibilitychange",onVisible);
-  },[acquireWakeLock,advanceTimer]);
-
+  // ── Controls ──────────────────────────────────────────────────────────────
   const handleStart=useCallback(async()=>{
     getAudioCtx();await acquireWakeLock();
-    setRound(1);setExIdx(0);setIsPaused(false);
+    setRound(1);setExIdx(0);setExSet(1);setIsPaused(false);
     setPhase(PHASES.COUNTDOWN);setTimeLeft(config.countdownSec);startTick();
   },[config,getAudioCtx,acquireWakeLock,startTick]);
 
   const handlePause=useCallback(()=>{
-    setIsPaused(p=>{if(!p){deadlineRef.current=null;}else{deadlineRef.current=performance.now()+1000;}return!p;});
+    setIsPaused(p=>{
+      if(!p){deadlineRef.current=null;}
+      else{deadlineRef.current=performance.now()+1000;}
+      return!p;
+    });
   },[]);
 
   const handleReset=useCallback(()=>{
     stopTimer();releaseWakeLock();
-    setPhase(PHASES.IDLE);setRound(1);setExIdx(0);setTimeLeft(0);setIsPaused(false);
+    setPhase(PHASES.IDLE);setRound(1);setExIdx(0);setExSet(1);setTimeLeft(0);setIsPaused(false);
   },[stopTimer,releaseWakeLock]);
 
   useEffect(()=>()=>{stopTimer();releaseWakeLock();},[stopTimer,releaseWakeLock]);
 
+  // ── Workout save/load ─────────────────────────────────────────────────────
   const handleSaveWorkout=()=>{
     if(!saveName.trim())return;
-    const workout={id:Date.now(),name:saveName.trim(),createdAt:new Date().toLocaleDateString("de-DE"),config:{...editConfig,exercises:editConfig.exercises.map(e=>({...e}))}};
+    const workout={
+      id:Date.now(),name:saveName.trim(),
+      createdAt:new Date().toLocaleDateString("de-DE"),
+      config:{...editConfig,exercises:editConfig.exercises.map(e=>({...e}))},
+    };
     setSavedWorkouts(prev=>[workout,...prev]);
     setSaveName("");setShowSaveDialog(false);
   };
@@ -188,19 +270,41 @@ function FitnessTimer(){
   const handleDeleteWorkout=(id)=>{setSavedWorkouts(prev=>prev.filter(w=>w.id!==id));setConfirmDelete(null);};
   const handleUseWorkout=(w)=>{setConfig({...w.config,exercises:w.config.exercises.map(e=>({...e}))});handleReset();setTab("timer");};
 
-  const addExercise=()=>setEditConfig(c=>({...c,exercises:[...c.exercises,{name:`Übung ${c.exercises.length+1}`,workSec:40,restSec:20}]}));
+  // ── Config helpers ────────────────────────────────────────────────────────
+  const addExercise=()=>setEditConfig(c=>({...c,exercises:[...c.exercises,{name:`Übung ${c.exercises.length+1}`,workSec:40,restSec:20,sets:3}]}));
   const removeExercise=i=>setEditConfig(c=>({...c,exercises:c.exercises.filter((_,idx)=>idx!==i)}));
   const updateExercise=(i,field,val)=>setEditConfig(c=>({...c,exercises:c.exercises.map((ex,idx)=>idx===i?{...ex,[field]:val}:ex)}));
   const applyConfig=()=>{setConfig({...editConfig,exercises:editConfig.exercises.map(e=>({...e}))});handleReset();setTab("timer");};
 
+  // ── Derived display ───────────────────────────────────────────────────────
   const currentEx=config.exercises[exIdx]||config.exercises[0];
-  const totalTime=phase===PHASES.WORK?currentEx.workSec:phase===PHASES.REST?currentEx.restSec:phase===PHASES.ROUND_REST?config.restBetweenRounds:phase===PHASES.COUNTDOWN?config.countdownSec:1;
+  const totalTime=
+    phase===PHASES.WORK?currentEx.workSec:
+    phase===PHASES.REST||phase===PHASES.SET_REST?currentEx.restSec:
+    phase===PHASES.ROUND_REST?config.restBetweenRounds:
+    phase===PHASES.COUNTDOWN?config.countdownSec:1;
   const progress=totalTime>0?((totalTime-timeLeft)/totalTime)*100:0;
   const isRunning=phase!==PHASES.IDLE&&phase!==PHASES.DONE;
-  const phaseColor={[PHASES.IDLE]:"#4ade80",[PHASES.COUNTDOWN]:"#facc15",[PHASES.WORK]:"#f97316",[PHASES.REST]:"#38bdf8",[PHASES.ROUND_REST]:"#a78bfa",[PHASES.DONE]:"#4ade80"}[phase]||"#4ade80";
-  const phaseLabel={[PHASES.IDLE]:"Bereit",[PHASES.COUNTDOWN]:"Vorbereitung",[PHASES.WORK]:"ÜBUNG",[PHASES.REST]:"PAUSE",[PHASES.ROUND_REST]:"RUNDEN-PAUSE",[PHASES.DONE]:"FERTIG! 🎉"}[phase];
 
-  const TABS=[{id:"timer",label:"▶ Timer"},{id:"config",label:"⚙ Setup"},{id:"workouts",label:`📂 Meine${savedWorkouts.length>0?` (${savedWorkouts.length})`:""}`}];
+  const phaseColor={
+    [PHASES.IDLE]:"#4ade80",[PHASES.COUNTDOWN]:"#facc15",
+    [PHASES.WORK]:"#f97316",[PHASES.REST]:"#38bdf8",
+    [PHASES.SET_REST]:"#38bdf8",[PHASES.ROUND_REST]:"#a78bfa",
+    [PHASES.DONE]:"#4ade80",
+  }[phase]||"#4ade80";
+
+  const phaseLabel={
+    [PHASES.IDLE]:"Bereit",[PHASES.COUNTDOWN]:"Vorbereitung",
+    [PHASES.WORK]:"ÜBUNG",[PHASES.REST]:"PAUSE",
+    [PHASES.SET_REST]:"PAUSE",[PHASES.ROUND_REST]:"RUNDEN-PAUSE",
+    [PHASES.DONE]:"FERTIG! 🎉",
+  }[phase];
+
+  const TABS=[
+    {id:"timer",label:"▶ Timer"},
+    {id:"config",label:"⚙ Setup"},
+    {id:"workouts",label:`📂${savedWorkouts.length>0?` (${savedWorkouts.length})`:""}`},
+  ];
 
   const btnStyle={width:44,height:44,borderRadius:10,border:"1px solid #2a2a3e",background:"#1a1a2e",color:"#f0f0f0",cursor:"pointer",fontSize:22,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1,fontFamily:"inherit",flexShrink:0};
 
@@ -217,6 +321,7 @@ function FitnessTimer(){
     );
   }
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return(
     <div style={{minHeight:"100vh",background:"#0a0a0f",color:"#f0f0f0",fontFamily:"'Courier New',monospace",display:"flex",flexDirection:"column",alignItems:"center",paddingBottom:60,userSelect:"none"}}>
 
@@ -239,9 +344,11 @@ function FitnessTimer(){
         ))}
       </div>
 
-      {/* ── TIMER ── */}
+      {/* ══ TIMER TAB ══ */}
       {tab==="timer"&&(
-        <div style={{width:"100%",maxWidth:480,padding:"24px 20px 0",display:"flex",flexDirection:"column",alignItems:"center",gap:24}}>
+        <div style={{width:"100%",maxWidth:480,padding:"24px 20px 0",display:"flex",flexDirection:"column",alignItems:"center",gap:20}}>
+
+          {/* Circular timer */}
           <div style={{position:"relative",width:240,height:240,margin:"8px 0"}}>
             <svg width="240" height="240" style={{transform:"rotate(-90deg)"}}>
               <circle cx="120" cy="120" r="108" fill="none" stroke="#1a1a2e" strokeWidth="10"/>
@@ -254,32 +361,63 @@ function FitnessTimer(){
               <div style={{fontSize:phase===PHASES.DONE?36:52,fontWeight:700,lineHeight:1,letterSpacing:-2,color:"#fff"}}>
                 {phase===PHASES.DONE?"💪":fmtTime(Math.max(0,timeLeft))}
               </div>
-              {isRunning&&phase===PHASES.WORK&&<div style={{fontSize:13,color:"#aaa",marginTop:6,textAlign:"center",maxWidth:140}}>{currentEx.name}</div>}
+              {isRunning&&phase===PHASES.WORK&&(
+                <div style={{fontSize:13,color:"#aaa",marginTop:4,textAlign:"center",maxWidth:160}}>
+                  {currentEx.name}
+                  {currentEx.sets>1&&(
+                    <span style={{color:phaseColor,marginLeft:6}}>{exSet}/{currentEx.sets}</span>
+                  )}
+                </div>
+              )}
+              {isRunning&&(phase===PHASES.REST)&&(
+                <div style={{fontSize:12,color:"#aaa",marginTop:4}}>
+                  Satz {exSet}/{currentEx.sets} · {currentEx.name}
+                </div>
+              )}
             </div>
           </div>
 
-          <div style={{display:"flex",gap:32,justifyContent:"center"}}>
+          {/* Runde / Übung / Satz */}
+          <div style={{display:"flex",gap:20,justifyContent:"center"}}>
             <div style={{textAlign:"center"}}>
               <div style={{fontSize:10,letterSpacing:3,color:"#555",textTransform:"uppercase"}}>Runde</div>
-              <div style={{fontSize:26,fontWeight:700}}>{round}<span style={{color:"#444",fontSize:16}}>/{config.rounds}</span></div>
+              <div style={{fontSize:24,fontWeight:700}}>{round}<span style={{color:"#333",fontSize:14}}>/{config.rounds}</span></div>
             </div>
-            <div style={{width:1,background:"#222"}}/>
+            <div style={{width:1,background:"#1e1e2e"}}/>
             <div style={{textAlign:"center"}}>
               <div style={{fontSize:10,letterSpacing:3,color:"#555",textTransform:"uppercase"}}>Übung</div>
-              <div style={{fontSize:26,fontWeight:700}}>{exIdx+1}<span style={{color:"#444",fontSize:16}}>/{config.exercises.length}</span></div>
+              <div style={{fontSize:24,fontWeight:700}}>{exIdx+1}<span style={{color:"#333",fontSize:14}}>/{config.exercises.length}</span></div>
+            </div>
+            <div style={{width:1,background:"#1e1e2e"}}/>
+            <div style={{textAlign:"center"}}>
+              <div style={{fontSize:10,letterSpacing:3,color:"#555",textTransform:"uppercase"}}>Satz</div>
+              <div style={{fontSize:24,fontWeight:700,color:phaseColor}}>{exSet}<span style={{color:"#333",fontSize:14}}>/{currentEx.sets}</span></div>
             </div>
           </div>
 
-          {(phase===PHASES.WORK||phase===PHASES.REST||phase===PHASES.IDLE)&&(
+          {/* Exercise queue */}
+          {(phase===PHASES.WORK||phase===PHASES.REST||phase===PHASES.SET_REST||phase===PHASES.IDLE)&&(
             <div style={{width:"100%",display:"flex",flexDirection:"column",gap:8}}>
-              {config.exercises.map((ex,i)=>(
-                <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 16px",borderRadius:10,background:i===exIdx&&isRunning?"#1a1a2e":"#111118",border:`1px solid ${i===exIdx&&isRunning?phaseColor+"44":"#1e1e2e"}`,transition:"all 0.3s",opacity:i<exIdx?0.35:1}}>
-                  <div style={{width:8,height:8,borderRadius:"50%",background:i===exIdx&&isRunning?phaseColor:i<exIdx?"#333":"#2a2a3e",flexShrink:0}}/>
-                  <div style={{flex:1,fontSize:14}}>{ex.name}</div>
-                  <div style={{fontSize:12,color:"#f97316"}}>{ex.workSec}s</div>
-                  <div style={{fontSize:12,color:"#555"}}>+{ex.restSec}s</div>
-                </div>
-              ))}
+              {config.exercises.map((ex,i)=>{
+                const isActive=i===exIdx&&isRunning;
+                const isDone=i<exIdx||(i===exIdx&&phase===PHASES.DONE);
+                return(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",borderRadius:10,background:isActive?"#1a1a2e":"#111118",border:`1px solid ${isActive?phaseColor+"44":"#1e1e2e"}`,transition:"all 0.3s",opacity:isDone?0.3:1}}>
+                    <div style={{width:8,height:8,borderRadius:"50%",background:isActive?phaseColor:isDone?"#222":"#2a2a3e",flexShrink:0}}/>
+                    <div style={{flex:1,fontSize:14}}>{ex.name}</div>
+                    <div style={{fontSize:11,color:"#f97316"}}>{ex.workSec}s</div>
+                    <div style={{fontSize:11,color:"#555"}}>×{ex.sets}</div>
+                    {/* Satz-Dots für aktive Übung */}
+                    {isActive&&ex.sets>1&&(
+                      <div style={{display:"flex",gap:4}}>
+                        {Array.from({length:ex.sets}).map((_,si)=>(
+                          <div key={si} style={{width:6,height:6,borderRadius:"50%",background:si<exSet-1?"#4ade80":si===exSet-1?phaseColor:"#2a2a3e",transition:"background 0.3s"}}/>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -289,6 +427,7 @@ function FitnessTimer(){
             </div>
           )}
 
+          {/* Controls */}
           <div style={{display:"flex",gap:12,width:"100%"}}>
             {phase===PHASES.IDLE||phase===PHASES.DONE?(
               <button onClick={handleStart} style={{flex:1,padding:"18px",borderRadius:14,border:"none",background:phaseColor,color:"#0a0a0f",fontSize:16,fontWeight:700,fontFamily:"inherit",cursor:"pointer",letterSpacing:2,textTransform:"uppercase",boxShadow:`0 0 32px ${phaseColor}55`}}>
@@ -306,14 +445,18 @@ function FitnessTimer(){
         </div>
       )}
 
-      {/* ── CONFIG ── */}
+      {/* ══ CONFIG TAB ══ */}
       {tab==="config"&&(
         <div style={{width:"100%",maxWidth:480,padding:"24px 20px 0",display:"flex",flexDirection:"column",gap:20}}>
           <div>
             <div style={{fontSize:10,letterSpacing:4,color:"#555",textTransform:"uppercase",marginBottom:12}}>Allgemein</div>
             <div style={{background:"#111118",borderRadius:14,padding:"16px",border:"1px solid #1e1e2e"}}>
-              {[["Runden",editConfig.rounds,1,20,undefined,v=>setEditConfig(c=>({...c,rounds:v}))],["Pause zwischen Runden",editConfig.restBetweenRounds,5,300,"s",v=>setEditConfig(c=>({...c,restBetweenRounds:v}))],["Vorbereitung",editConfig.countdownSec,3,30,"s",v=>setEditConfig(c=>({...c,countdownSec:v}))]].map(([label,val,min,max,unit,onChange])=>(
-                <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid #1e1e2e"}}>
+              {[
+                ["Runden",editConfig.rounds,1,20,undefined,v=>setEditConfig(c=>({...c,rounds:v}))],
+                ["Pause zwischen Runden",editConfig.restBetweenRounds,5,300,"s",v=>setEditConfig(c=>({...c,restBetweenRounds:v}))],
+                ["Vorbereitung",editConfig.countdownSec,3,30,"s",v=>setEditConfig(c=>({...c,countdownSec:v}))],
+              ].map(([label,val,min,max,unit,onChange],li)=>(
+                <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:li<2?"1px solid #1e1e2e":"none"}}>
                   <div style={{fontSize:13,color:"#888"}}>{label}</div>
                   <NumInput value={val} min={min} max={max} unit={unit} onChange={onChange}/>
                 </div>
@@ -325,20 +468,34 @@ function FitnessTimer(){
             <div style={{fontSize:10,letterSpacing:4,color:"#555",textTransform:"uppercase",marginBottom:12}}>Übungen</div>
             {editConfig.exercises.map((ex,i)=>(
               <div key={i} style={{background:"#111118",borderRadius:14,padding:"16px",border:"1px solid #1e1e2e",marginBottom:12}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                {/* Name + delete */}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
                   <input value={ex.name} onChange={e=>updateExercise(i,"name",e.target.value)}
                     style={{background:"transparent",border:"none",borderBottom:"1px solid #2a2a3e",color:"#f0f0f0",fontSize:16,fontFamily:"inherit",fontWeight:700,flex:1,outline:"none",padding:"4px 0",marginRight:12}}/>
                   {editConfig.exercises.length>1&&(
                     <button onClick={()=>removeExercise(i)} style={{background:"#1a0a0a",border:"1px solid #f9731644",borderRadius:8,color:"#f97316",cursor:"pointer",fontSize:14,width:40,height:40,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>✕</button>
                   )}
                 </div>
+                {/* Durchläufe */}
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,background:"#0d0d18",borderRadius:10,padding:"12px 14px"}}>
-                  <div style={{fontSize:11,letterSpacing:2,color:"#f97316",textTransform:"uppercase",width:56,flexShrink:0}}>Arbeit</div>
+                  <div style={{fontSize:11,letterSpacing:2,color:"#4ade80",textTransform:"uppercase",width:80,flexShrink:0}}>Sätze</div>
+                  <NumInput value={ex.sets} min={1} max={20} onChange={v=>updateExercise(i,"sets",v)}/>
+                </div>
+                {/* Arbeit */}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,background:"#0d0d18",borderRadius:10,padding:"12px 14px"}}>
+                  <div style={{fontSize:11,letterSpacing:2,color:"#f97316",textTransform:"uppercase",width:80,flexShrink:0}}>Dauer</div>
                   <NumInput value={ex.workSec} min={5} max={600} onChange={v=>updateExercise(i,"workSec",v)} unit="s"/>
                 </div>
+                {/* Pause */}
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#0d0d18",borderRadius:10,padding:"12px 14px"}}>
-                  <div style={{fontSize:11,letterSpacing:2,color:"#38bdf8",textTransform:"uppercase",width:56,flexShrink:0}}>Pause</div>
+                  <div style={{fontSize:11,letterSpacing:2,color:"#38bdf8",textTransform:"uppercase",width:80,flexShrink:0}}>Pause</div>
                   <NumInput value={ex.restSec} min={0} max={300} onChange={v=>updateExercise(i,"restSec",v)} unit="s"/>
+                </div>
+                {/* Summary */}
+                <div style={{marginTop:10,fontSize:11,color:"#444",textAlign:"right"}}>
+                  {ex.sets}× {ex.workSec}s Dauer / {ex.restSec}s Pause
+                  {" · "}
+                  <span style={{color:"#555"}}>{Math.ceil((ex.sets*ex.workSec+(ex.sets-1)*ex.restSec)/60)} min</span>
                 </div>
               </div>
             ))}
@@ -356,6 +513,7 @@ function FitnessTimer(){
             </button>
           </div>
 
+          {/* Save dialog */}
           {showSaveDialog&&(
             <div style={{position:"fixed",inset:0,background:"#000000cc",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:100,padding:"0 0 40px 0"}}>
               <div style={{width:"100%",maxWidth:480,background:"#111118",borderRadius:"20px 20px 0 0",padding:"28px 24px",border:"1px solid #2a2a3e"}}>
@@ -376,27 +534,30 @@ function FitnessTimer(){
         </div>
       )}
 
-      {/* ── WORKOUTS ── */}
+      {/* ══ WORKOUTS TAB ══ */}
       {tab==="workouts"&&(
         <div style={{width:"100%",maxWidth:480,padding:"24px 20px 0",display:"flex",flexDirection:"column",gap:12}}>
           {savedWorkouts.length===0?(
             <div style={{textAlign:"center",padding:"60px 20px",color:"#444"}}>
               <div style={{fontSize:40,marginBottom:16}}>📂</div>
-              <div style={{fontSize:14,lineHeight:1.8}}>Noch keine Trainings gespeichert.<br/>Setup-Tab → 💾 Speichern</div>
+              <div style={{fontSize:14,lineHeight:1.8}}>Noch keine Trainings gespeichert.<br/>Setup → 💾 Speichern</div>
             </div>
           ):savedWorkouts.map(w=>(
             <div key={w.id} style={{background:"#111118",borderRadius:14,padding:"16px",border:"1px solid #1e1e2e"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
                 <div>
                   <div style={{fontSize:16,fontWeight:700,marginBottom:2}}>{w.name}</div>
-                  <div style={{fontSize:11,color:"#555"}}>{w.createdAt} · {w.config.exercises.length} Übungen · {w.config.rounds} Runden · ⏱ ca. {Math.ceil(totalWorkoutSec(w.config)/60)} min</div>
+                  <div style={{fontSize:11,color:"#555"}}>
+                    {w.createdAt} · {w.config.exercises.length} Übungen · {w.config.rounds} Runden · ⏱ ca. {Math.ceil(totalWorkoutSec(w.config)/60)} min
+                  </div>
                 </div>
                 <button onClick={()=>setConfirmDelete(w.id)} style={{background:"none",border:"none",color:"#333",cursor:"pointer",fontSize:18,padding:"0 0 0 8px"}}>✕</button>
               </div>
-              <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>
+              <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12}}>
                 {w.config.exercises.map((ex,i)=>(
                   <div key={i} style={{fontSize:11,padding:"4px 10px",borderRadius:20,background:"#1a1a2e",color:"#aaa",border:"1px solid #2a2a3e"}}>
                     {ex.name} <span style={{color:"#f97316"}}>{ex.workSec}s</span>
+                    {(ex.sets||1)>1&&<span style={{color:"#4ade80"}}>×{ex.sets}</span>}
                   </div>
                 ))}
               </div>
