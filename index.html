@@ -271,7 +271,7 @@ function FitnessTimer(){
   const handleUseWorkout=(w)=>{setConfig({...w.config,exercises:w.config.exercises.map(e=>({...e}))});handleReset();setTab("timer");};
 
   // ── Config helpers ────────────────────────────────────────────────────────
-  const addExercise=()=>setEditConfig(c=>({...c,exercises:[...c.exercises,{name:`Übung ${c.exercises.length+1}`,workSec:40,restSec:20,sets:3}]}));
+  const addExercise=()=>setEditConfig(c=>({...c,exercises:[...c.exercises,{name:`Übung ${c.exercises.length+1}`,workSec:20,restSec:10,sets:8}]}));
   const removeExercise=i=>setEditConfig(c=>({...c,exercises:c.exercises.filter((_,idx)=>idx!==i)}));
   const updateExercise=(i,field,val)=>setEditConfig(c=>({...c,exercises:c.exercises.map((ex,idx)=>idx===i?{...ex,[field]:val}:ex)}));
   const applyConfig=()=>{setConfig({...editConfig,exercises:editConfig.exercises.map(e=>({...e}))});handleReset();setTab("timer");};
