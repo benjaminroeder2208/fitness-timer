@@ -364,11 +364,41 @@ function FitnessTimer(){
   const totalTime=phase===PHASES.WORK?currentStep.workSec:phase===PHASES.REST?currentStep.restSec:phase===PHASES.EX_BREAK?(seq[seqIdx]?.kind==="break"?seq[seqIdx].durationSec:0):phase===PHASES.ROUND_REST?config.restBetweenRounds:phase===PHASES.COUNTDOWN?config.countdownSec:1;
   const progress=totalTime>0?((totalTime-timeLeft)/totalTime)*100:0;
 
-  // Total workout progress
+  // Total workout progress (time-based, accurate)
   const totalSec=totalWorkoutSec(config);
-  const seqTotal=seq.length;
-  const stepsCompleted=seqIdx+(phase===PHASES.DONE?1:0);
-  const overallProgress=seqTotal>0?(stepsCompleted/seqTotal)*100:0;
+  // Calculate elapsed seconds: sum all completed steps + remaining of current step
+  function calcElapsedSec(seq,seqIdx,exSet,phase,timeLeft,cfg){
+    let elapsed=0;
+    // Sum fully completed sequence steps before current
+    for(let i=0;i<seqIdx;i++){
+      const s=seq[i];
+      if(s.kind==="exercise") elapsed+=s.sets*s.workSec+(s.sets-1)*s.restSec;
+      else elapsed+=s.durationSec;
+    }
+    // Add elapsed time within current step
+    const cur=seq[seqIdx];
+    if(!cur) return elapsed;
+    if(phase===PHASES.WORK){
+      // completed sets of this exercise
+      elapsed+=(exSet-1)*(cur.workSec+(exSet>1?cur.restSec:0));
+      elapsed+=(cur.workSec-timeLeft);
+    } else if(phase===PHASES.REST){
+      elapsed+=(exSet-1)*cur.workSec+(exSet>1?(exSet-1)*cur.restSec:0);
+      elapsed+=cur.workSec;
+      elapsed+=(cur.restSec-timeLeft);
+    } else if(phase===PHASES.EX_BREAK){
+      // current step is a break
+      if(cur.kind==="break") elapsed+=(cur.durationSec-timeLeft);
+    } else if(phase===PHASES.ROUND_REST){
+      elapsed+=(cfg.restBetweenRounds-timeLeft);
+    } else if(phase===PHASES.COUNTDOWN){
+      // not started yet
+    }
+    return elapsed;
+  }
+  const elapsedSec=calcElapsedSec(seq,seqIdx,exSet,phase,timeLeft,config);
+  const overallProgress=totalSec>0?Math.min(100,(elapsedSec/totalSec)*100):0;
+  const remainingTotalSec=Math.max(0,totalSec-elapsedSec);
 
   const isRunning=phase!==PHASES.IDLE&&phase!==PHASES.DONE;
   const totalEx=totalExercises(config.items);
@@ -445,10 +475,20 @@ function FitnessTimer(){
       {tab==="timer"&&(
         <div style={{width:"100%",maxWidth:480,padding:"20px 20px 0",display:"flex",flexDirection:"column",alignItems:"center",gap:16}}>
 
-          {/* Overall progress bar */}
+          {/* Overall progress bar + time */}
           {isRunning&&(
-            <div style={{width:"100%",height:4,background:"var(--bg3)",borderRadius:2,overflow:"hidden"}}>
-              <div style={{height:"100%",background:phaseColor,width:`${overallProgress}%`,transition:"width 0.5s linear",borderRadius:2}}/>
+            <div style={{width:"100%"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:5}}>
+                <div style={{fontSize:10,letterSpacing:2,textTransform:"uppercase",...S.text3}}>
+                  Gesamt {Math.round(overallProgress)}%
+                </div>
+                <div style={{fontSize:13,fontWeight:700,color:phaseColor}}>
+                  {fmtTime(remainingTotalSec)} <span style={{fontSize:10,fontWeight:400,...S.text4}}>verbleibend</span>
+                </div>
+              </div>
+              <div style={{width:"100%",height:6,background:"var(--bg3)",borderRadius:3,overflow:"hidden"}}>
+                <div style={{height:"100%",background:phaseColor,width:`${overallProgress}%`,transition:"width 1s linear",borderRadius:3}}/>
+              </div>
             </div>
           )}
 
